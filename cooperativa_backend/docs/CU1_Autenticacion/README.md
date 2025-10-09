@@ -82,7 +82,7 @@ sequenceDiagram
 - ✅ **Gestión de Tokens JWT** con refresh automático
 - ✅ **Validación de Credenciales** segura y eficiente
 - ✅ **Rate Limiting** para prevenir ataques de fuerza bruta
-- ✅ **Tests Unitarios** completos (113 tests passing)
+- ✅ **Tests Unitarios** completos (160 tests passing)
 
 ### **T013: Bitácora de Auditoría**
 - ✅ **Modelo BitacoraAuditoria** con campos completos
@@ -156,7 +156,7 @@ sequenceDiagram
 ## 🧪 Calidad y Testing
 
 ### **Cobertura de Tests**
-- **Backend:** 113 tests unitarios (100% cobertura crítica)
+- **Backend:** 160 tests unitarios (100% cobertura crítica)
 - **Frontend:** Tests de componentes y integración
 - **Móvil:** Tests de widgets y servicios
 - **API:** Tests de endpoints REST completos
