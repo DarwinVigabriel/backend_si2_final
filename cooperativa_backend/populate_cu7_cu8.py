@@ -1,260 +1,28 @@
 #!/usr/bin/env python
 """
-Script para poblar la base de datos con datos de prueba
+Script para poblar la base de datos con datos de ejemplo para CU7 (Semillas) y CU8 (Insumos)
 """
 import os
 import sys
 import django
+from datetime import date
 from django.utils import timezone
 
 # Configurar Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cooperativa_backend.settings')
 django.setup()
 
-from cooperativa.models import Rol, Usuario, Comunidad, Socio, Parcela, Cultivo, Semilla, Pesticida, Fertilizante
+from cooperativa.models import Semilla, Pesticida, Fertilizante
 
-def crear_datos_prueba():
-    print("Verificando y creando datos de prueba...")
-
-    # Verificar y crear roles usando los métodos del modelo
-    print("Verificando roles...")
-    admin_rol = Rol.crear_rol_administrador()
-    print("✓ Rol Administrador configurado")
-
-    socio_rol = Rol.crear_rol_socio()
-    print("✓ Rol Socio configurado")
-
-    operador_rol = Rol.crear_rol_operador()
-    print("✓ Rol Operador configurado")
-
-    # Verificar y crear comunidades
-    print("Verificando comunidades...")
-    if not Comunidad.objects.filter(nombre='Comunidad San Pedro').exists():
-        comunidad1 = Comunidad.objects.create(
-            nombre='Comunidad San Pedro',
-            municipio='Cochabamba',
-            departamento='Cochabamba'
-        )
-        print("✓ Comunidad San Pedro creada")
-    else:
-        comunidad1 = Comunidad.objects.get(nombre='Comunidad San Pedro')
-        print("✓ Comunidad San Pedro ya existe")
-
-    if not Comunidad.objects.filter(nombre='Comunidad Villa Tunari').exists():
-        comunidad2 = Comunidad.objects.create(
-            nombre='Comunidad Villa Tunari',
-            municipio='Villa Tunari',
-            departamento='Cochabamba'
-        )
-        print("✓ Comunidad Villa Tunari creada")
-    else:
-        comunidad2 = Comunidad.objects.get(nombre='Comunidad Villa Tunari')
-        print("✓ Comunidad Villa Tunari ya existe")
-
-    # Verificar y crear usuarios adicionales
-    print("Verificando usuarios...")
-    if not Usuario.objects.filter(ci_nit='123456780').exists():
-        operador_user = Usuario.objects.create_user(
-            ci_nit='123456780',
-            nombres='Juan Carlos',
-            apellidos='Rodriguez Silva',
-            email='operador@cooperativa.com',
-            usuario='operador1',
-            password='operador123'
-        )
-        print("✓ Usuario operador1 creado")
-    else:
-        operador_user = Usuario.objects.get(ci_nit='123456780')
-        print("✓ Usuario operador1 ya existe")
-
-    if not Usuario.objects.filter(ci_nit='987654320').exists():
-        socio1_user = Usuario.objects.create_user(
-            ci_nit='987654320',
-            nombres='Maria Elena',
-            apellidos='Perez Lopez',
-            email='maria@cooperativa.com',
-            usuario='socio1',
-            password='socio123'
-        )
-        print("✓ Usuario socio1 creado")
-    else:
-        socio1_user = Usuario.objects.get(ci_nit='987654320')
-        print("✓ Usuario socio1 ya existe")
-
-    if not Usuario.objects.filter(ci_nit='456789120').exists():
-        socio2_user = Usuario.objects.create_user(
-            ci_nit='456789120',
-            nombres='Carlos Alberto',
-            apellidos='Gomez Martinez',
-            email='carlos@cooperativa.com',
-            usuario='socio2',
-            password='socio123'
-        )
-        print("✓ Usuario socio2 creado")
-    else:
-        socio2_user = Usuario.objects.get(ci_nit='456789120')
-        print("✓ Usuario socio2 ya existe")
-
-    # Verificar y crear socios
-    print("Verificando socios...")
-    if not Socio.objects.filter(usuario__usuario='socio1').exists():
-        socio1 = Socio.objects.create(
-            usuario=socio1_user,
-            codigo_interno='SOC001',
-            fecha_nacimiento='1985-05-15',
-            sexo='F',
-            direccion='Zona Norte, Calle Principal 123',
-            comunidad=comunidad1
-        )
-        print("✓ Socio SOC001 creado")
-    else:
-        socio1 = Socio.objects.get(usuario__usuario='socio1')
-        print("✓ Socio SOC001 ya existe")
-
-    if not Socio.objects.filter(usuario__usuario='socio2').exists():
-        socio2 = Socio.objects.create(
-            usuario=socio2_user,
-            codigo_interno='SOC002',
-            fecha_nacimiento='1978-12-03',
-            sexo='M',
-            direccion='Zona Sur, Avenida Central 456',
-            comunidad=comunidad2
-        )
-        print("✓ Socio SOC002 creado")
-    else:
-        socio2 = Socio.objects.get(usuario__usuario='socio2')
-        print("✓ Socio SOC002 ya existe")
-
-    # Verificar y crear parcelas
-    print("Verificando parcelas...")
-    if not Parcela.objects.filter(socio=socio1, nombre='Parcela Norte').exists():
-        parcela1 = Parcela.objects.create(
-            socio=socio1,
-            nombre='Parcela Norte',
-            superficie_hectareas=5.5,
-            tipo_suelo='Arcilloso',
-            ubicacion='Sector Norte de la comunidad',
-            latitud=-17.3895,
-            longitud=-66.1568,
-            estado='ACTIVA'
-        )
-        print("✓ Parcela Norte creada")
-    else:
-        parcela1 = Parcela.objects.get(socio=socio1, nombre='Parcela Norte')
-        print("✓ Parcela Norte ya existe")
-
-    if not Parcela.objects.filter(socio=socio1, nombre='Parcela Sur').exists():
-        parcela2 = Parcela.objects.create(
-            socio=socio1,
-            nombre='Parcela Sur',
-            superficie_hectareas=3.0,
-            tipo_suelo='Arenoso',
-            ubicacion='Sector Sur de la comunidad',
-            latitud=-17.3912,
-            longitud=-66.1589,
-            estado='ACTIVA'
-        )
-        print("✓ Parcela Sur creada")
-    else:
-        parcela2 = Parcela.objects.get(socio=socio1, nombre='Parcela Sur')
-        print("✓ Parcela Sur ya existe")
-
-    if not Parcela.objects.filter(socio=socio2, nombre='Parcela Principal').exists():
-        parcela3 = Parcela.objects.create(
-            socio=socio2,
-            nombre='Parcela Principal',
-            superficie_hectareas=8.0,
-            tipo_suelo='Franco',
-            ubicacion='Centro de la comunidad',
-            latitud=-17.3856,
-            longitud=-66.1543,
-            estado='ACTIVA'
-        )
-        print("✓ Parcela Principal creada")
-    else:
-        parcela3 = Parcela.objects.get(socio=socio2, nombre='Parcela Principal')
-        print("✓ Parcela Principal ya existe")
-
-    # Verificar y crear cultivos
-    print("Verificando cultivos...")
-    if not Cultivo.objects.filter(parcela=parcela1, especie='Maíz').exists():
-        cultivo1 = Cultivo.objects.create(
-            parcela=parcela1,
-            especie='Maíz',
-            variedad='Maíz duro',
-            tipo_semilla='Híbrido',
-            fecha_estimada_siembra='2025-11-15',
-            hectareas_sembradas=3.0,
-            estado='ACTIVO'
-        )
-        print("✓ Cultivo Maíz creado")
-    else:
-        print("✓ Cultivo Maíz ya existe")
-
-    if not Cultivo.objects.filter(parcela=parcela2, especie='Papa').exists():
-        cultivo2 = Cultivo.objects.create(
-            parcela=parcela2,
-            especie='Papa',
-            variedad='Papa blanca',
-            tipo_semilla='Nativa',
-            fecha_estimada_siembra='2025-12-20',
-            hectareas_sembradas=2.5,
-            estado='ACTIVO'
-        )
-        print("✓ Cultivo Papa creado")
-    else:
-        print("✓ Cultivo Papa ya existe")
-
-    if not Cultivo.objects.filter(parcela=parcela3, especie='Trigo').exists():
-        cultivo3 = Cultivo.objects.create(
-            parcela=parcela3,
-            especie='Trigo',
-            variedad='Trigo panadero',
-            tipo_semilla='Mejorada',
-            fecha_estimada_siembra='2025-12-01',
-            hectareas_sembradas=6.0,
-            estado='ACTIVO'
-        )
-        print("✓ Cultivo Trigo creado")
-    else:
-        print("✓ Cultivo Trigo ya existe")
-
-    print("\n✅ Verificación completada!")
-    print(f"Total Roles: {Rol.objects.count()}")
-    print(f"Total Usuarios: {Usuario.objects.count()}")
-    print(f"Total Comunidades: {Comunidad.objects.count()}")
-    print(f"Total Socios: {Socio.objects.count()}")
-    print(f"Total Parcelas: {Parcela.objects.count()}")
-    print(f"Total Cultivos: {Cultivo.objects.count()}")
-
-    print("\nCredenciales de acceso:")
-    print("Admin: usuario='admin', password='admin123'")
-    print("Operador: usuario='operador1', password='operador123'")
-    print("Socio1: usuario='socio1', password='socio123'")
-    print("Socio2: usuario='socio2', password='socio123'")
-
-    # Asignar roles a usuarios
-    print("Asignando roles a usuarios...")
-    from cooperativa.models import UsuarioRol
-
-    # Asignar rol Operador al usuario operador1
-    if not UsuarioRol.objects.filter(usuario=operador_user, rol=operador_rol).exists():
-        UsuarioRol.objects.create(usuario=operador_user, rol=operador_rol)
-        print("✓ Rol Operador asignado a operador1")
-
-    # Asignar rol Socio a socio1 y socio2
-    if not UsuarioRol.objects.filter(usuario=socio1_user, rol=socio_rol).exists():
-        UsuarioRol.objects.create(usuario=socio1_user, rol=socio_rol)
-        print("✓ Rol Socio asignado a socio1")
-
-    if not UsuarioRol.objects.filter(usuario=socio2_user, rol=socio_rol).exists():
-        UsuarioRol.objects.create(usuario=socio2_user, rol=socio_rol)
-        print("✓ Rol Socio asignado a socio2")
-
+def convertir_fecha(fecha_str):
+    """Convierte una fecha en formato string 'YYYY-MM-DD' a objeto date"""
+    if fecha_str:
+        return date.fromisoformat(fecha_str)
+    return None
 
 def poblar_datos_cu7_cu8():
     """Poblar datos de ejemplo para CU7 (Semillas) y CU8 (Insumos)"""
-    print("\n🌱 Poblando datos de CU7 (Semillas) y CU8 (Insumos)...")
+    print("🌱 Poblando datos de CU7 (Semillas) y CU8 (Insumos)...")
 
     # Datos de ejemplo para CU7 - Semillas
     semillas_data = [
@@ -406,7 +174,10 @@ def poblar_datos_cu7_cu8():
     for semilla_data in semillas_data:
         lote = semilla_data['lote']
         if not Semilla.objects.filter(lote=lote).exists():
-            Semilla.objects.create(**semilla_data)
+            # Convertir fecha_vencimiento a objeto date
+            data_to_create = semilla_data.copy()
+            data_to_create['fecha_vencimiento'] = convertir_fecha(semilla_data.get('fecha_vencimiento'))
+            Semilla.objects.create(**data_to_create)
             semillas_creadas += 1
             print(f"✓ Semilla {lote} creada")
         else:
@@ -594,9 +365,17 @@ def poblar_datos_cu7_cu8():
     for pesticida_data in pesticidas_data:
         lote = pesticida_data['lote']
         if not Pesticida.objects.filter(lote=lote).exists():
-            Pesticida.objects.create(**pesticida_data)
-            pesticidas_creados += 1
-            print(f"✓ Pesticida {lote} creado")
+            try:
+                # Convertir fecha_vencimiento a objeto date
+                data_to_create = pesticida_data.copy()
+                data_to_create['fecha_vencimiento'] = convertir_fecha(pesticida_data.get('fecha_vencimiento'))
+                Pesticida.objects.create(**data_to_create)
+                pesticidas_creados += 1
+                print(f"✓ Pesticida {lote} creado")
+            except Exception as e:
+                print(f"❌ Error creando pesticida {lote}: {e}")
+                print(f"   Datos: {data_to_create}")
+                raise
         else:
             print(f"✓ Pesticida {lote} ya existe")
 
@@ -761,16 +540,25 @@ def poblar_datos_cu7_cu8():
     for fertilizante_data in fertilizantes_data:
         lote = fertilizante_data['lote']
         if not Fertilizante.objects.filter(lote=lote).exists():
-            Fertilizante.objects.create(**fertilizante_data)
-            fertilizantes_creados += 1
-            print(f"✓ Fertilizante {lote} creado")
+            try:
+                # Convertir fecha_vencimiento a objeto date
+                data_to_create = fertilizante_data.copy()
+                data_to_create['fecha_vencimiento'] = convertir_fecha(fertilizante_data.get('fecha_vencimiento'))
+                Fertilizante.objects.create(**data_to_create)
+                fertilizantes_creados += 1
+                print(f"✓ Fertilizante {lote} creado")
+            except Exception as e:
+                print(f"❌ Error creando fertilizante {lote}: {e}")
+                print(f"   Nombre: {fertilizante_data.get('nombre_comercial')}")
+                print(f"   Datos: {data_to_create}")
+                raise
         else:
             print(f"✓ Fertilizante {lote} ya existe")
 
     print(f"🌿 Total fertilizantes creados: {fertilizantes_creados}")
 
     print("\n✅ Población de CU7 y CU8 completada!")
-    print(f"📊 Resumen final:")
+    print("📊 Resumen final:")
     print(f"   Semillas: {Semilla.objects.count()}")
     print(f"   Pesticidas: {Pesticida.objects.count()}")
     print(f"   Fertilizantes: {Fertilizante.objects.count()}")
@@ -778,5 +566,4 @@ def poblar_datos_cu7_cu8():
 
 
 if __name__ == '__main__':
-    crear_datos_prueba()
     poblar_datos_cu7_cu8()

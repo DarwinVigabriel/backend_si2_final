@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django import forms
 from django.utils import timezone
-from .models import Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, BitacoraAuditoria, UsuarioRol
+from .models import Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, Fertilizante
 
 # Register your models here.
 
@@ -307,3 +307,468 @@ class BitacoraAuditoriaAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('usuario')
+
+
+@admin.register(Semilla)
+class SemillaAdmin(admin.ModelAdmin):
+    """
+    CU7: Administración de semillas en Django Admin
+    T-40: Gestión del catálogo de inventario de semillas
+    T-41: CRUD de semillas desde el admin
+    """
+    list_display = (
+        'id', 'especie', 'variedad', 'cantidad', 'unidad_medida',
+        'fecha_vencimiento', 'porcentaje_germinacion', 'estado',
+        'proveedor', 'lote', 'valor_total', 'dias_para_vencer'
+    )
+    list_filter = (
+        'estado', 'especie', 'proveedor', 'fecha_vencimiento',
+        'unidad_medida', 'creado_en'
+    )
+    search_fields = (
+        'especie', 'variedad', 'proveedor', 'lote',
+        'ubicacion_almacen'
+    )
+    readonly_fields = (
+        'creado_en', 'actualizado_en', 'valor_total',
+        'dias_para_vencer', 'esta_proxima_vencer', 'esta_vencida'
+    )
+    list_editable = ('estado',)
+    date_hierarchy = 'fecha_vencimiento'
+
+    fieldsets = (
+        ('Información Básica', {
+            'fields': ('especie', 'variedad', 'estado')
+        }),
+        ('Inventario', {
+            'fields': ('cantidad', 'unidad_medida', 'ubicacion_almacen')
+        }),
+        ('Calidad y Vencimiento', {
+            'fields': ('fecha_vencimiento', 'porcentaje_germinacion', 'lote')
+        }),
+        ('Proveedor y Costos', {
+            'fields': ('proveedor', 'precio_unitario')
+        }),
+        ('Información Adicional', {
+            'fields': ('observaciones',),
+            'classes': ('collapse',)
+        }),
+        ('Campos Calculados', {
+            'fields': ('valor_total', 'dias_para_vencer', 'esta_proxima_vencer', 'esta_vencida'),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': ('creado_en', 'actualizado_en'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    actions = [
+        'marcar_como_disponible',
+        'marcar_como_agotada',
+        'marcar_como_vencida',
+        'marcar_como_reservada',
+        'exportar_inventario_csv'
+    ]
+
+    def valor_total(self, obj):
+        return f"{obj.valor_total():.2f} Bs" if obj.valor_total() else "N/A"
+    valor_total.short_description = 'Valor Total'
+
+    def dias_para_vencer(self, obj):
+        dias = obj.dias_para_vencer()
+        if dias is None:
+            return "N/A"
+        elif dias < 0:
+            return f"Vencida ({abs(dias)} días)"
+        elif dias == 0:
+            return "Vence hoy"
+        else:
+            return f"{dias} días"
+    dias_para_vencer.short_description = 'Días para Vencer'
+
+    def marcar_como_disponible(self, request, queryset):
+        updated = queryset.update(estado='DISPONIBLE')
+        self.message_user(
+            request,
+            f'{updated} semilla(s) marcada(s) como disponible(s).'
+        )
+    marcar_como_disponible.short_description = "Marcar como Disponible"
+
+    def marcar_como_agotada(self, request, queryset):
+        updated = queryset.update(estado='AGOTADA')
+        self.message_user(
+            request,
+            f'{updated} semilla(s) marcada(s) como agotada(s).'
+        )
+    marcar_como_agotada.short_description = "Marcar como Agotada"
+
+    def marcar_como_vencida(self, request, queryset):
+        updated = queryset.update(estado='VENCIDA')
+        self.message_user(
+            request,
+            f'{updated} semilla(s) marcada(s) como vencida(s).'
+        )
+    marcar_como_vencida.short_description = "Marcar como Vencida"
+
+    def marcar_como_reservada(self, request, queryset):
+        updated = queryset.update(estado='RESERVADA')
+        self.message_user(
+            request,
+            f'{updated} semilla(s) marcada(s) como reservada(s).'
+        )
+    marcar_como_reservada.short_description = "Marcar como Reservada"
+
+    def exportar_inventario_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="inventario_semillas_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Especie', 'Variedad', 'Cantidad', 'Unidad',
+            'Fecha Vencimiento', 'PG%', 'Estado', 'Proveedor',
+            'Lote', 'Precio Unitario', 'Valor Total', 'Ubicación'
+        ])
+
+        for semilla in queryset:
+            writer.writerow([
+                semilla.id,
+                semilla.especie,
+                semilla.variedad or '',
+                semilla.cantidad,
+                semilla.unidad_medida,
+                semilla.fecha_vencimiento,
+                semilla.porcentaje_germinacion,
+                semilla.estado,
+                semilla.proveedor or '',
+                semilla.lote or '',
+                semilla.precio_unitario or '',
+                semilla.valor_total(),
+                semilla.ubicacion_almacen or ''
+            ])
+
+        self.message_user(request, f'Exportadas {queryset.count()} semillas a CSV.')
+        return response
+
+    exportar_inventario_csv.short_description = "Exportar inventario a CSV"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).order_by('-creado_en')
+
+
+@admin.register(Pesticida)
+class PesticidaAdmin(admin.ModelAdmin):
+    """
+    CU8: Administración de pesticidas en Django Admin
+    T-42: Gestión de Inventario de Pesticidas
+    """
+    list_display = (
+        'id', 'nombre_comercial', 'ingrediente_activo', 'tipo_pesticida',
+        'cantidad', 'unidad_medida', 'fecha_vencimiento', 'estado',
+        'proveedor', 'lote', 'valor_total', 'dias_para_vencer'
+    )
+    list_filter = (
+        'estado', 'tipo_pesticida', 'proveedor', 'fecha_vencimiento',
+        'unidad_medida', 'creado_en'
+    )
+    search_fields = (
+        'nombre_comercial', 'ingrediente_activo', 'proveedor', 'lote',
+        'ubicacion_almacen'
+    )
+    readonly_fields = (
+        'creado_en', 'actualizado_en', 'valor_total',
+        'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido'
+    )
+    list_editable = ('estado',)
+    date_hierarchy = 'fecha_vencimiento'
+
+    fieldsets = (
+        ('Información Básica', {
+            'fields': ('nombre_comercial', 'ingrediente_activo', 'tipo_pesticida', 'estado')
+        }),
+        ('Composición y Concentración', {
+            'fields': ('concentracion', 'registro_sanitario')
+        }),
+        ('Inventario', {
+            'fields': ('cantidad', 'unidad_medida', 'ubicacion_almacen')
+        }),
+        ('Vencimiento y Dosis', {
+            'fields': ('fecha_vencimiento', 'dosis_recomendada')
+        }),
+        ('Proveedor y Costos', {
+            'fields': ('proveedor', 'precio_unitario', 'lote')
+        }),
+        ('Información Adicional', {
+            'fields': ('observaciones',),
+            'classes': ('collapse',)
+        }),
+        ('Campos Calculados', {
+            'fields': ('valor_total', 'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido'),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': ('creado_en', 'actualizado_en'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    actions = [
+        'marcar_como_disponible',
+        'marcar_como_agotado',
+        'marcar_como_vencido',
+        'marcar_como_en_cuarentena',
+        'exportar_inventario_csv'
+    ]
+
+    def valor_total(self, obj):
+        return f"{obj.valor_total():.2f} Bs" if obj.valor_total() else "N/A"
+    valor_total.short_description = 'Valor Total'
+
+    def dias_para_vencer(self, obj):
+        dias = obj.dias_para_vencer()
+        if dias is None:
+            return "N/A"
+        elif dias < 0:
+            return f"Vencido ({abs(dias)} días)"
+        elif dias == 0:
+            return "Vence hoy"
+        else:
+            return f"{dias} días"
+    dias_para_vencer.short_description = 'Días para Vencer'
+
+    def marcar_como_disponible(self, request, queryset):
+        updated = queryset.update(estado='DISPONIBLE')
+        self.message_user(
+            request,
+            f'{updated} pesticida(s) marcado(s) como disponible(s).'
+        )
+    marcar_como_disponible.short_description = "Marcar como Disponible"
+
+    def marcar_como_agotado(self, request, queryset):
+        updated = queryset.update(estado='AGOTADO')
+        self.message_user(
+            request,
+            f'{updated} pesticida(s) marcado(s) como agotado(s).'
+        )
+    marcar_como_agotado.short_description = "Marcar como Agotado"
+
+    def marcar_como_vencido(self, request, queryset):
+        updated = queryset.update(estado='VENCIDO')
+        self.message_user(
+            request,
+            f'{updated} pesticida(s) marcado(s) como vencido(s).'
+        )
+    marcar_como_vencido.short_description = "Marcar como Vencida"
+
+    def marcar_como_en_cuarentena(self, request, queryset):
+        updated = queryset.update(estado='EN_CUARENTENA')
+        self.message_user(
+            request,
+            f'{updated} pesticida(s) marcado(s) en cuarentena.'
+        )
+    marcar_como_en_cuarentena.short_description = "Marcar en Cuarentena"
+
+    def exportar_inventario_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="inventario_pesticidas_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Nombre Comercial', 'Ingrediente Activo', 'Tipo',
+            'Concentración', 'Cantidad', 'Unidad', 'Fecha Vencimiento',
+            'Estado', 'Proveedor', 'Lote', 'Precio Unitario', 'Valor Total', 'Ubicación'
+        ])
+
+        for pesticida in queryset:
+            writer.writerow([
+                pesticida.id,
+                pesticida.nombre_comercial,
+                pesticida.ingrediente_activo,
+                pesticida.tipo_pesticida,
+                pesticida.concentracion,
+                pesticida.cantidad,
+                pesticida.unidad_medida,
+                pesticida.fecha_vencimiento,
+                pesticida.estado,
+                pesticida.proveedor,
+                pesticida.lote,
+                pesticida.precio_unitario,
+                pesticida.valor_total(),
+                pesticida.ubicacion_almacen or ''
+            ])
+
+        self.message_user(request, f'Exportados {queryset.count()} pesticidas a CSV.')
+        return response
+
+    exportar_inventario_csv.short_description = "Exportar inventario a CSV"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).order_by('-creado_en')
+
+
+@admin.register(Fertilizante)
+class FertilizanteAdmin(admin.ModelAdmin):
+    """
+    CU8: Administración de fertilizantes en Django Admin
+    T-45: Gestión de Inventario de Fertilizantes
+    """
+    list_display = (
+        'id', 'nombre_comercial', 'tipo_fertilizante', 'composicion_npk',
+        'cantidad', 'unidad_medida', 'fecha_vencimiento', 'estado',
+        'proveedor', 'lote', 'valor_total', 'dias_para_vencer'
+    )
+    list_filter = (
+        'estado', 'tipo_fertilizante', 'proveedor', 'fecha_vencimiento',
+        'unidad_medida', 'creado_en'
+    )
+    search_fields = (
+        'nombre_comercial', 'composicion_npk', 'proveedor', 'lote',
+        'ubicacion_almacen'
+    )
+    readonly_fields = (
+        'creado_en', 'actualizado_en', 'valor_total',
+        'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido', 'npk_values'
+    )
+    list_editable = ('estado',)
+    date_hierarchy = 'fecha_vencimiento'
+
+    fieldsets = (
+        ('Información Básica', {
+            'fields': ('nombre_comercial', 'tipo_fertilizante', 'estado')
+        }),
+        ('Composición', {
+            'fields': ('composicion_npk', 'materia_orgánica')
+        }),
+        ('Inventario', {
+            'fields': ('cantidad', 'unidad_medida', 'ubicacion_almacen')
+        }),
+        ('Vencimiento y Dosis', {
+            'fields': ('fecha_vencimiento', 'dosis_recomendada')
+        }),
+        ('Proveedor y Costos', {
+            'fields': ('proveedor', 'precio_unitario', 'lote')
+        }),
+        ('Información Adicional', {
+            'fields': ('observaciones',),
+            'classes': ('collapse',)
+        }),
+        ('Campos Calculados', {
+            'fields': ('valor_total', 'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido', 'npk_values'),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': ('creado_en', 'actualizado_en'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    actions = [
+        'marcar_como_disponible',
+        'marcar_como_agotado',
+        'marcar_como_vencido',
+        'marcar_como_en_cuarentena',
+        'exportar_inventario_csv'
+    ]
+
+    def valor_total(self, obj):
+        return f"{obj.valor_total():.2f} Bs" if obj.valor_total() else "N/A"
+    valor_total.short_description = 'Valor Total'
+
+    def dias_para_vencer(self, obj):
+        dias = obj.dias_para_vencer()
+        if dias is None:
+            return "N/A"
+        elif dias < 0:
+            return f"Vencido ({abs(dias)} días)"
+        elif dias == 0:
+            return "Vence hoy"
+        else:
+            return f"{dias} días"
+    dias_para_vencer.short_description = 'Días para Vencer'
+
+    def npk_values(self, obj):
+        values = obj.get_npk_values()
+        if values:
+            return f"N: {values.get('N', 0)}%, P: {values.get('P', 0)}%, K: {values.get('K', 0)}%"
+        return "N/A"
+    npk_values.short_description = 'Valores NPK'
+
+    def marcar_como_disponible(self, request, queryset):
+        updated = queryset.update(estado='DISPONIBLE')
+        self.message_user(
+            request,
+            f'{updated} fertilizante(s) marcado(s) como disponible(s).'
+        )
+    marcar_como_disponible.short_description = "Marcar como Disponible"
+
+    def marcar_como_agotado(self, request, queryset):
+        updated = queryset.update(estado='AGOTADO')
+        self.message_user(
+            request,
+            f'{updated} fertilizante(s) marcado(s) como agotado(s).'
+        )
+    marcar_como_agotado.short_description = "Marcar como Agotado"
+
+    def marcar_como_vencido(self, request, queryset):
+        updated = queryset.update(estado='VENCIDO')
+        self.message_user(
+            request,
+            f'{updated} fertilizante(s) marcado(s) como vencido(s).'
+        )
+    marcar_como_vencido.short_description = "Marcar como Vencido"
+
+    def marcar_como_en_cuarentena(self, request, queryset):
+        updated = queryset.update(estado='EN_CUARENTENA')
+        self.message_user(
+            request,
+            f'{updated} fertilizante(s) marcado(s) en cuarentena.'
+        )
+    marcar_como_en_cuarentena.short_description = "Marcar en Cuarentena"
+
+    def exportar_inventario_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="inventario_fertilizantes_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Nombre Comercial', 'Tipo', 'Composición NPK',
+            'Cantidad', 'Unidad', 'Fecha Vencimiento', 'Estado',
+            'Proveedor', 'Lote', 'Precio Unitario', 'Valor Total', 'Ubicación'
+        ])
+
+        for fertilizante in queryset:
+            writer.writerow([
+                fertilizante.id,
+                fertilizante.nombre_comercial,
+                fertilizante.tipo_fertilizante,
+                fertilizante.composicion_npk,
+                fertilizante.cantidad,
+                fertilizante.unidad_medida,
+                fertilizante.fecha_vencimiento,
+                fertilizante.estado,
+                fertilizante.proveedor,
+                fertilizante.lote,
+                fertilizante.precio_unitario,
+                fertilizante.valor_total(),
+                fertilizante.ubicacion_almacen or ''
+            ])
+
+        self.message_user(request, f'Exportados {queryset.count()} fertilizantes a CSV.')
+        return response
+
+    exportar_inventario_csv.short_description = "Exportar inventario a CSV"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).order_by('-creado_en')

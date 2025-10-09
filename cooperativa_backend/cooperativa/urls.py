@@ -20,6 +20,13 @@ router.register(r'tratamientos', views.TratamientoViewSet)
 router.register(r'analisis-suelo', views.AnalisisSueloViewSet)
 router.register(r'transferencias-parcela', views.TransferenciaParcelaViewSet)
 
+# CU7: ViewSet para gestión de semillas
+router.register(r'semillas', views.SemillaViewSet)
+
+# CU8: ViewSets para gestión de insumos agrícolas
+router.register(r'pesticidas', views.PesticidaViewSet)
+router.register(r'fertilizantes', views.FertilizanteViewSet)
+
 # URLs de la aplicación
 urlpatterns = [
     # Endpoints específicos deben ir ANTES del router para evitar conflictos
@@ -62,6 +69,11 @@ urlpatterns = [
     path('api/reportes/roles-permisos/', views.reporte_roles_permisos, name='reporte-roles-permisos'),
     path('api/roles/crear-personalizado/', views.crear_rol_personalizado, name='crear-rol-personalizado'),
     path('api/roles/buscar-avanzado/', views.buscar_roles_avanzado, name='buscar-roles-avanzado'),
+
+    # CU7: Endpoints específicos para gestión de semillas
+    # path('api/semillas/buscar-avanzado/', views.buscar_semillas_avanzado, name='buscar-semillas-avanzado'),
+    # path('api/validar/semilla/', views.validar_semilla, name='validar-semilla'),
+    # path('api/reportes/estadisticas-semillas/', views.estadisticas_semillas, name='estadisticas-semillas'),
 
     # Nueva ruta para el endpoint de sesión de depuración
     path('api/auth/debug-session/', views.debug_session_status, name='debug-session'),

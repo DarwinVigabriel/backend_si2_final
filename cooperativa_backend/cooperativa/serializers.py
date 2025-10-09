@@ -5,7 +5,8 @@ from django.core.validators import MinValueValidator
 from .models import (
     Rol, Usuario, UsuarioRol, Comunidad, Socio,
     Parcela, Cultivo, BitacoraAuditoria,
-    CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela
+    CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
+    Semilla, Pesticida, Fertilizante
 )
 
 
@@ -361,6 +362,48 @@ class SocioCreateSerializer(serializers.ModelSerializer):
         return socio
 
 
+class SocioCreateSimpleSerializer(serializers.ModelSerializer):
+    """Serializer simple para creación de socios (solo campos del socio, sin usuario)"""
+    class Meta:
+        model = Socio
+        fields = [
+            'codigo_interno', 'fecha_nacimiento', 'sexo',
+            'direccion', 'comunidad', 'estado'
+        ]
+
+    def validate_codigo_interno(self, value):
+        """T027: Validación de código interno único"""
+        if not value:
+            return value
+
+        if Socio.objects.filter(codigo_interno__iexact=value).exists():
+            raise serializers.ValidationError('Ya existe un socio con este código interno')
+        return value
+
+
+class SocioUpdateSerializer(serializers.ModelSerializer):
+    """Serializer para actualización de socios"""
+    class Meta:
+        model = Socio
+        fields = [
+            'codigo_interno', 'fecha_nacimiento', 'sexo',
+            'direccion', 'comunidad', 'estado'
+        ]
+
+    def validate_codigo_interno(self, value):
+        """T027: Validación de código interno único"""
+        if not value:
+            return value
+
+        queryset = Socio.objects.filter(codigo_interno__iexact=value)
+        if self.instance:
+            queryset = queryset.exclude(id=self.instance.id)
+
+        if queryset.exists():
+            raise serializers.ValidationError('Ya existe un socio con este código interno')
+        return value
+
+
 class ParcelaSerializer(serializers.ModelSerializer):
     socio_nombre = serializers.CharField(source='socio.usuario.get_full_name', read_only=True)
     # Campos adicionales para compatibilidad con frontend
@@ -551,213 +594,108 @@ class BitacoraAuditoriaSerializer(serializers.ModelSerializer):
         ]
 
 
-class RolSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Rol
-        fields = '__all__'
-
-
-class UsuarioSerializer(serializers.ModelSerializer):
-    roles = serializers.SerializerMethodField()
-    nombre_completo = serializers.SerializerMethodField()
+class SemillaSerializer(serializers.ModelSerializer):
+    """CU7: Serializer para gestión de semillas"""
+    valor_total = serializers.SerializerMethodField()
+    dias_para_vencer = serializers.SerializerMethodField()
+    esta_proxima_vencer = serializers.SerializerMethodField()
+    esta_vencida = serializers.SerializerMethodField()
 
     class Meta:
-        model = Usuario
+        model = Semilla
         fields = [
-            'id', 'ci_nit', 'nombres', 'apellidos', 'email', 'telefono',
-            'usuario', 'estado', 'is_staff', 'intentos_fallidos', 'ultimo_intento',
-            'fecha_bloqueo', 'creado_en', 'actualizado_en', 'roles',
-            'nombre_completo'
+            'id', 'especie', 'variedad', 'cantidad', 'unidad_medida',
+            'fecha_vencimiento', 'porcentaje_germinacion', 'lote',
+            'proveedor', 'precio_unitario', 'ubicacion_almacen',
+            'estado', 'observaciones', 'creado_en', 'actualizado_en',
+            # Campos calculados
+            'valor_total', 'dias_para_vencer', 'esta_proxima_vencer', 'esta_vencida'
         ]
-        extra_kwargs = {
-            'contrasena_hash': {'write_only': True},
-            'token_actual': {'write_only': True},
-        }
+        read_only_fields = ['valor_total', 'dias_para_vencer', 'esta_proxima_vencer', 'esta_vencida']
 
-    def get_roles(self, obj):
-        roles = UsuarioRol.objects.filter(usuario=obj).select_related('rol')
-        return [usuario_rol.rol.nombre for usuario_rol in roles]
+    def get_valor_total(self, obj):
+        return obj.valor_total()
 
-    def get_nombre_completo(self, obj):
-        return f"{obj.nombres} {obj.apellidos}"
+    def get_dias_para_vencer(self, obj):
+        return obj.dias_para_vencer()
 
+    def get_esta_proxima_vencer(self, obj):
+        return obj.esta_proxima_vencer()
 
-class UsuarioCreateSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True)
-    roles = serializers.ListField(
-        child=serializers.CharField(),
-        write_only=True,
-        required=False
-    )
+    def get_esta_vencida(self, obj):
+        return obj.esta_vencida()
 
-    class Meta:
-        model = Usuario
-        fields = [
-            'id', 'ci_nit', 'nombres', 'apellidos', 'email', 'telefono',
-            'usuario', 'password', 'roles'
-        ]
-
-    def create(self, validated_data):
-        roles_data = validated_data.pop('roles', [])
-        password = validated_data.pop('password')
-
-        user = Usuario(**validated_data)
-        user.set_password(password)
-        user.save()
-
-        # Assign roles
-        for rol_nombre in roles_data:
-            try:
-                rol = Rol.objects.get(nombre=rol_nombre)
-                UsuarioRol.objects.create(usuario=user, rol=rol)
-            except Rol.DoesNotExist:
-                pass  # Skip invalid roles
-
-        return user
-
-
-class UsuarioRolSerializer(serializers.ModelSerializer):
-    usuario_nombre = serializers.CharField(source='usuario.get_full_name', read_only=True)
-    rol_nombre = serializers.CharField(source='rol.nombre', read_only=True)
-
-    class Meta:
-        model = UsuarioRol
-        fields = ['id', 'usuario', 'rol', 'usuario_nombre', 'rol_nombre', 'creado_en']
-
-
-class ComunidadSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Comunidad
-        fields = '__all__'
-
-
-class SocioSerializer(serializers.ModelSerializer):
-    usuario = UsuarioSerializer(read_only=True)
-    comunidad = ComunidadSerializer(read_only=True)
-
-    class Meta:
-        model = Socio
-        fields = [
-            'id', 'usuario', 'codigo_interno',
-            'fecha_nacimiento', 'sexo', 'direccion', 'comunidad',
-            'estado', 'creado_en'
-        ]
-
-
-class SocioCreateSimpleSerializer(serializers.ModelSerializer):
-    """Serializer específico para creación de socios con usuario y comunidad existentes"""
-    usuario = serializers.PrimaryKeyRelatedField(queryset=Usuario.objects.all())
-    comunidad = serializers.PrimaryKeyRelatedField(queryset=Comunidad.objects.all())
-
-    class Meta:
-        model = Socio
-        fields = [
-            'usuario', 'codigo_interno', 'fecha_nacimiento',
-            'sexo', 'direccion', 'comunidad'
-        ]
-
-    def validate_usuario(self, value):
-        """Validar que el usuario no tenga ya un socio"""
-        if Socio.objects.filter(usuario=value).exists():
-            raise serializers.ValidationError('Este usuario ya tiene un socio registrado')
+    def validate_porcentaje_germinacion(self, value):
+        """Validación específica del porcentaje de germinación"""
+        if value < 0 or value > 100:
+            raise serializers.ValidationError('El porcentaje de germinación debe estar entre 0 y 100')
         return value
 
-    def validate_codigo_interno(self, value):
-        """Validar código interno único"""
-        if Socio.objects.filter(codigo_interno__iexact=value).exists():
-            raise serializers.ValidationError('Ya existe un socio con este código interno')
+    def validate_fecha_vencimiento(self, value):
+        """Validación de fecha de vencimiento"""
+        from datetime import date
+        if value and value < date.today():
+            # Solo validar si no está ya vencida (para evitar problemas al editar registros existentes)
+            estado = self.initial_data.get('estado') if hasattr(self, 'initial_data') else getattr(self.instance, 'estado', None) if self.instance else None
+            if estado != 'VENCIDA':
+                raise serializers.ValidationError('La fecha de vencimiento no puede ser en el pasado')
         return value
 
+    def validate_cantidad(self, value):
+        """Validación de cantidad"""
+        if value < 0:
+            raise serializers.ValidationError('La cantidad no puede ser negativa')
+        return value
 
-class SocioUpdateSerializer(serializers.ModelSerializer):
-    """Serializer específico para actualización de socios con usuario incluido"""
-    usuario = UsuarioSerializer()
+    def validate_precio_unitario(self, value):
+        """Validación de precio unitario"""
+        if value is not None and value < 0:
+            raise serializers.ValidationError('El precio unitario no puede ser negativo')
+        return value
 
-    class Meta:
-        model = Socio
-        fields = [
-            'id', 'usuario', 'codigo_interno',
-            'fecha_nacimiento', 'sexo', 'direccion', 'comunidad',
-            'estado', 'creado_en'
-        ]
+    def validate(self, data):
+        """Validaciones entre campos"""
+        # Validar que si está agotada, cantidad debe ser 0
+        estado = data.get('estado')
+        cantidad = data.get('cantidad')
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Set the instance for the nested usuario serializer
-        if self.instance and hasattr(self.instance, 'usuario'):
-            usuario_serializer = self.fields['usuario']
-            usuario_serializer.instance = self.instance.usuario
+        if estado == 'AGOTADA' and cantidad != 0:
+            raise serializers.ValidationError({
+                'cantidad': 'Una semilla agotada debe tener cantidad 0'
+            })
 
-    def to_internal_value(self, data):
-        """Handle nested usuario data properly"""
-        usuario_data = data.get('usuario', {})
-        if self.instance and hasattr(self.instance, 'usuario'):
-            # Create a UsuarioSerializer with the correct instance
-            usuario_serializer = UsuarioSerializer(instance=self.instance.usuario, data=usuario_data, partial=True)
-            usuario_validated = usuario_serializer.to_internal_value(usuario_data)
-            data = data.copy()
-            data['usuario'] = usuario_validated
-        return super().to_internal_value(data)
-
-    def update(self, instance, validated_data):
-        """Actualizar socio y usuario anidado"""
-        usuario_data = validated_data.pop('usuario', {})
-
-        # Actualizar campos del socio
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-
-        # Actualizar campos del usuario
-        if usuario_data:
-            usuario = instance.usuario
-            for attr, value in usuario_data.items():
-                setattr(usuario, attr, value)
-            usuario.save()
-
-        return instance
+        return data
 
 
 class CicloCultivoSerializer(serializers.ModelSerializer):
     """CU4: Serializer para ciclos de cultivo"""
     cultivo_especie = serializers.CharField(source='cultivo.especie', read_only=True)
-    cultivo_variedad = serializers.CharField(source='cultivo.variedad', read_only=True)
     parcela_nombre = serializers.CharField(source='cultivo.parcela.nombre', read_only=True)
     socio_nombre = serializers.CharField(source='cultivo.parcela.socio.usuario.get_full_name', read_only=True)
-    dias_transcurridos = serializers.SerializerMethodField()
-    progreso_estimado = serializers.SerializerMethodField()
 
     class Meta:
         model = CicloCultivo
         fields = [
-            'id', 'cultivo', 'cultivo_especie', 'cultivo_variedad',
-            'parcela_nombre', 'socio_nombre', 'fecha_inicio',
-            'fecha_estimada_fin', 'fecha_fin_real', 'estado',
-            'observaciones', 'costo_estimado', 'costo_real',
-            'rendimiento_esperado', 'rendimiento_real', 'unidad_rendimiento',
-            'dias_transcurridos', 'progreso_estimado', 'creado_en', 'actualizado_en'
+            'id', 'cultivo', 'cultivo_especie', 'parcela_nombre', 'socio_nombre',
+            'fecha_inicio', 'fecha_fin_estimada', 'fecha_fin_real',
+            'estado', 'observaciones', 'creado_en'
         ]
 
-    def get_dias_transcurridos(self, obj):
-        return obj.dias_transcurridos()
-
-    def get_progreso_estimado(self, obj):
-        return round(obj.progreso_estimado(), 2)
+    def validate_fecha_inicio(self, value):
+        """Validación de fecha de inicio"""
+        from datetime import date
+        if value < date.today():
+            raise serializers.ValidationError('La fecha de inicio no puede ser en el pasado')
+        return value
 
     def validate(self, data):
-        """Validaciones del ciclo de cultivo"""
+        """Validaciones entre campos"""
         fecha_inicio = data.get('fecha_inicio')
-        fecha_estimada_fin = data.get('fecha_estimada_fin')
-        fecha_fin_real = data.get('fecha_fin_real')
+        fecha_fin_estimada = data.get('fecha_fin_estimada')
 
-        if fecha_estimada_fin and fecha_inicio and fecha_estimada_fin < fecha_inicio:
+        if fecha_inicio and fecha_fin_estimada and fecha_fin_estimada <= fecha_inicio:
             raise serializers.ValidationError({
-                'fecha_estimada_fin': 'La fecha estimada de fin no puede ser anterior a la fecha de inicio'
-            })
-
-        if fecha_fin_real and fecha_inicio and fecha_fin_real < fecha_inicio:
-            raise serializers.ValidationError({
-                'fecha_fin_real': 'La fecha de fin real no puede ser anterior a la fecha de inicio'
+                'fecha_fin_estimada': 'La fecha de fin estimada debe ser posterior a la fecha de inicio'
             })
 
         return data
@@ -765,139 +703,272 @@ class CicloCultivoSerializer(serializers.ModelSerializer):
 
 class CosechaSerializer(serializers.ModelSerializer):
     """CU4: Serializer para cosechas"""
-    ciclo_info = CicloCultivoSerializer(source='ciclo_cultivo', read_only=True)
-    valor_total = serializers.SerializerMethodField()
+    ciclo_cultivo_especie = serializers.CharField(source='ciclo_cultivo.cultivo.especie', read_only=True)
+    parcela_nombre = serializers.CharField(source='ciclo_cultivo.cultivo.parcela.nombre', read_only=True)
+    socio_nombre = serializers.CharField(source='ciclo_cultivo.cultivo.parcela.socio.usuario.get_full_name', read_only=True)
 
     class Meta:
         model = Cosecha
         fields = [
-            'id', 'ciclo_cultivo', 'ciclo_info', 'fecha_cosecha',
-            'cantidad_cosechada', 'unidad_medida', 'calidad', 'estado',
-            'precio_venta', 'valor_total', 'observaciones', 'creado_en'
+            'id', 'ciclo_cultivo', 'ciclo_cultivo_especie', 'parcela_nombre', 'socio_nombre',
+            'fecha_cosecha', 'cantidad_cosechada', 'unidad_medida',
+            'calidad', 'estado', 'observaciones', 'creado_en'
         ]
 
-    def get_valor_total(self, obj):
-        return obj.valor_total()
+    def validate_cantidad_cosechada(self, value):
+        """Validación de cantidad cosechada"""
+        if value <= 0:
+            raise serializers.ValidationError('La cantidad cosechada debe ser mayor a 0')
+        return value
 
-    def validate(self, data):
-        """Validaciones de cosecha"""
-        fecha_cosecha = data.get('fecha_cosecha')
-        ciclo_cultivo = data.get('ciclo_cultivo') or (self.instance.ciclo_cultivo if self.instance else None)
-
-        if fecha_cosecha and ciclo_cultivo and fecha_cosecha < ciclo_cultivo.fecha_inicio:
-            raise serializers.ValidationError({
-                'fecha_cosecha': 'La fecha de cosecha no puede ser anterior al inicio del ciclo'
-            })
-
-        return data
+    def validate_fecha_cosecha(self, value):
+        """Validación de fecha de cosecha"""
+        from datetime import date
+        if value > date.today():
+            raise serializers.ValidationError('La fecha de cosecha no puede ser en el futuro')
+        return value
 
 
 class TratamientoSerializer(serializers.ModelSerializer):
     """CU4: Serializer para tratamientos"""
-    ciclo_info = CicloCultivoSerializer(source='ciclo_cultivo', read_only=True)
+    ciclo_cultivo_especie = serializers.CharField(source='ciclo_cultivo.cultivo.especie', read_only=True)
+    parcela_nombre = serializers.CharField(source='ciclo_cultivo.cultivo.parcela.nombre', read_only=True)
+    socio_nombre = serializers.CharField(source='ciclo_cultivo.cultivo.parcela.socio.usuario.get_full_name', read_only=True)
 
     class Meta:
         model = Tratamiento
         fields = [
-            'id', 'ciclo_cultivo', 'ciclo_info', 'tipo_tratamiento',
-            'nombre_producto', 'dosis', 'unidad_dosis', 'fecha_aplicacion',
-            'costo', 'observaciones', 'aplicado_por', 'creado_en'
+            'id', 'ciclo_cultivo', 'ciclo_cultivo_especie', 'parcela_nombre', 'socio_nombre',
+            'tipo_tratamiento', 'producto_utilizado', 'cantidad_aplicada',
+            'unidad_medida', 'fecha_aplicacion', 'responsable_aplicacion',
+            'observaciones', 'creado_en'
         ]
 
-    def validate(self, data):
-        """Validaciones de tratamiento"""
-        fecha_aplicacion = data.get('fecha_aplicacion')
-        ciclo_cultivo = data.get('ciclo_cultivo') or (self.instance.ciclo_cultivo if self.instance else None)
+    def validate_cantidad_aplicada(self, value):
+        """Validación de cantidad aplicada"""
+        if value <= 0:
+            raise serializers.ValidationError('La cantidad aplicada debe ser mayor a 0')
+        return value
 
-        if fecha_aplicacion and ciclo_cultivo:
-            if fecha_aplicacion < ciclo_cultivo.fecha_inicio:
-                raise serializers.ValidationError({
-                    'fecha_aplicacion': 'La fecha de aplicación no puede ser anterior al inicio del ciclo'
-                })
-
-            if ciclo_cultivo.fecha_fin_real and fecha_aplicacion > ciclo_cultivo.fecha_fin_real:
-                raise serializers.ValidationError({
-                    'fecha_aplicacion': 'La fecha de aplicación no puede ser posterior al fin del ciclo'
-                })
-
-        return data
+    def validate_fecha_aplicacion(self, value):
+        """Validación de fecha de aplicación"""
+        from datetime import date
+        if value > date.today():
+            raise serializers.ValidationError('La fecha de aplicación no puede ser en el futuro')
+        return value
 
 
 class AnalisisSueloSerializer(serializers.ModelSerializer):
     """CU4: Serializer para análisis de suelo"""
-    parcela_info = ParcelaSerializer(source='parcela', read_only=True)
-    recomendaciones_basicas = serializers.SerializerMethodField()
+    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
+    socio_nombre = serializers.CharField(source='parcela.socio.usuario.get_full_name', read_only=True)
 
     class Meta:
         model = AnalisisSuelo
         fields = [
-            'id', 'parcela', 'parcela_info', 'fecha_analisis', 'tipo_analisis', 'ph',
-            'materia_organica', 'nitrogeno', 'fosforo', 'potasio',
-            'laboratorio', 'recomendaciones', 'recomendaciones_basicas',
-            'costo_analisis', 'creado_en'
+            'id', 'parcela', 'parcela_nombre', 'socio_nombre',
+            'fecha_analisis', 'tipo_analisis', 'ph', 'materia_organica',
+            'nitrogeno', 'fosforo', 'potasio', 'laboratorio',
+            'responsable_analisis', 'observaciones', 'creado_en'
         ]
 
-    def get_recomendaciones_basicas(self, obj):
-        return obj.get_recomendaciones_basicas()
-
     def validate_ph(self, value):
-        """Validación específica del pH"""
-        if value is not None and not (4 <= value <= 10):
-            raise serializers.ValidationError('El pH del suelo debe estar entre 4 y 10 para ser óptimo para cultivos')
+        """Validación de pH"""
+        if value < 0 or value > 14:
+            raise serializers.ValidationError('El pH debe estar entre 0 y 14')
+        return value
+
+    def validate_fecha_analisis(self, value):
+        """Validación de fecha de análisis"""
+        from datetime import date
+        if value > date.today():
+            raise serializers.ValidationError('La fecha de análisis no puede ser en el futuro')
         return value
 
 
 class TransferenciaParcelaSerializer(serializers.ModelSerializer):
     """CU4: Serializer para transferencias de parcelas"""
-    parcela_info = ParcelaSerializer(source='parcela', read_only=True)
-    socio_anterior_info = SocioSerializer(source='socio_anterior', read_only=True)
-    socio_nuevo_info = SocioSerializer(source='socio_nuevo', read_only=True)
-    autorizado_por_info = UsuarioSerializer(source='autorizado_por', read_only=True)
+    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
+    socio_anterior_nombre = serializers.CharField(source='socio_anterior.usuario.get_full_name', read_only=True)
+    socio_nuevo_nombre = serializers.CharField(source='socio_nuevo.usuario.get_full_name', read_only=True)
+    autorizado_por_nombre = serializers.CharField(source='autorizado_por.get_full_name', read_only=True, allow_null=True)
 
     class Meta:
         model = TransferenciaParcela
         fields = [
-            'id', 'parcela', 'parcela_info', 'socio_anterior',
-            'socio_anterior_info', 'socio_nuevo', 'socio_nuevo_info',
-            'fecha_transferencia', 'motivo', 'documento_legal',
-            'costo_transferencia', 'estado', 'autorizado_por', 'autorizado_por_info',
-            'fecha_aprobacion', 'observaciones', 'creado_en'
+            'id', 'parcela', 'parcela_nombre', 'socio_anterior', 'socio_anterior_nombre',
+            'socio_nuevo', 'socio_nuevo_nombre', 'fecha_transferencia',
+            'motivo_transferencia', 'documentacion_adjunta', 'estado',
+            'autorizado_por', 'autorizado_por_nombre', 'fecha_aprobacion',
+            'observaciones', 'creado_en'
         ]
+        read_only_fields = ['autorizado_por', 'fecha_aprobacion']
+
+    def validate_fecha_transferencia(self, value):
+        """Validación de fecha de transferencia"""
+        from datetime import date
+        if value > date.today():
+            raise serializers.ValidationError('La fecha de transferencia no puede ser en el futuro')
+        return value
 
     def validate(self, data):
-        """Validaciones de transferencia"""
+        """Validaciones entre campos"""
         socio_anterior = data.get('socio_anterior')
         socio_nuevo = data.get('socio_nuevo')
-        parcela = data.get('parcela') or (self.instance.parcela if self.instance else None)
 
         if socio_anterior and socio_nuevo and socio_anterior == socio_nuevo:
-            raise serializers.ValidationError('El socio anterior y nuevo no pueden ser el mismo')
-
-        if parcela and socio_anterior and parcela.socio != socio_anterior:
-            raise serializers.ValidationError('El socio anterior no es el propietario actual de la parcela')
+            raise serializers.ValidationError({
+                'socio_nuevo': 'El socio nuevo debe ser diferente al socio anterior'
+            })
 
         return data
 
 
-class CultivoSerializer(serializers.ModelSerializer):
-    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
-    socio_nombre = serializers.CharField(source='parcela.socio.usuario.get_full_name', read_only=True)
+class PesticidaSerializer(serializers.ModelSerializer):
+    """CU8: Serializer para gestión de pesticidas"""
+    valor_total = serializers.SerializerMethodField()
+    dias_para_vencer = serializers.SerializerMethodField()
+    esta_proximo_vencer = serializers.SerializerMethodField()
+    esta_vencido = serializers.SerializerMethodField()
 
     class Meta:
-        model = Cultivo
+        model = Pesticida
         fields = [
-            'id', 'parcela', 'parcela_nombre', 'socio_nombre', 'especie',
-            'variedad', 'tipo_semilla', 'fecha_estimada_siembra',
-            'hectareas_sembradas', 'estado', 'creado_en'
+            'id', 'nombre_comercial', 'ingrediente_activo', 'tipo_pesticida',
+            'concentracion', 'cantidad', 'unidad_medida', 'fecha_vencimiento',
+            'lote', 'proveedor', 'precio_unitario', 'ubicacion_almacen',
+            'estado', 'registro_sanitario', 'dosis_recomendada', 'observaciones',
+            'creado_en', 'actualizado_en',
+            # Campos calculados
+            'valor_total', 'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido'
         ]
+        read_only_fields = ['valor_total', 'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido']
+
+    def get_valor_total(self, obj):
+        return obj.valor_total()
+
+    def get_dias_para_vencer(self, obj):
+        return obj.dias_para_vencer()
+
+    def get_esta_proximo_vencer(self, obj):
+        return obj.esta_proximo_vencer()
+
+    def get_esta_vencido(self, obj):
+        return obj.esta_vencido()
+
+    def validate_fecha_vencimiento(self, value):
+        """Validación de fecha de vencimiento"""
+        from datetime import date
+        if value and value < date.today():
+            raise serializers.ValidationError('La fecha de vencimiento no puede ser en el pasado')
+        return value
+
+    def validate_cantidad(self, value):
+        """Validación de cantidad"""
+        if value < 0:
+            raise serializers.ValidationError('La cantidad no puede ser negativa')
+        return value
+
+    def validate_precio_unitario(self, value):
+        """Validación de precio unitario"""
+        if value <= 0:
+            raise serializers.ValidationError('El precio unitario debe ser mayor a 0')
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        estado = data.get('estado')
+        cantidad = data.get('cantidad')
+
+        if estado == 'AGOTADO' and cantidad != 0:
+            raise serializers.ValidationError({
+                'cantidad': 'Un pesticida agotado debe tener cantidad 0'
+            })
+
+        return data
 
 
-class BitacoraAuditoriaSerializer(serializers.ModelSerializer):
-    usuario_nombre = serializers.CharField(source='usuario.get_full_name', read_only=True)
+class FertilizanteSerializer(serializers.ModelSerializer):
+    """CU8: Serializer para gestión de fertilizantes"""
+    valor_total = serializers.SerializerMethodField()
+    dias_para_vencer = serializers.SerializerMethodField()
+    esta_proximo_vencer = serializers.SerializerMethodField()
+    esta_vencido = serializers.SerializerMethodField()
+    npk_values = serializers.SerializerMethodField()
 
     class Meta:
-        model = BitacoraAuditoria
+        model = Fertilizante
         fields = [
-            'id', 'usuario', 'usuario_nombre', 'accion', 'tabla_afectada',
-            'registro_id', 'detalles', 'fecha', 'ip_address', 'user_agent'
+            'id', 'nombre_comercial', 'tipo_fertilizante', 'composicion_npk',
+            'cantidad', 'unidad_medida', 'fecha_vencimiento', 'lote',
+            'proveedor', 'precio_unitario', 'ubicacion_almacen', 'estado',
+            'dosis_recomendada', 'materia_orgánica', 'observaciones',
+            'creado_en', 'actualizado_en',
+            # Campos calculados
+            'valor_total', 'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido', 'npk_values'
         ]
+        read_only_fields = ['valor_total', 'dias_para_vencer', 'esta_proximo_vencer', 'esta_vencido', 'npk_values']
+
+    def get_valor_total(self, obj):
+        return obj.valor_total()
+
+    def get_dias_para_vencer(self, obj):
+        return obj.dias_para_vencer()
+
+    def get_esta_proximo_vencer(self, obj):
+        return obj.esta_proximo_vencer()
+
+    def get_esta_vencido(self, obj):
+        return obj.esta_vencido()
+
+    def get_npk_values(self, obj):
+        return obj.get_npk_values()
+
+    def validate_fecha_vencimiento(self, value):
+        """Validación de fecha de vencimiento"""
+        from datetime import date
+        tipo_fertilizante = self.initial_data.get('tipo_fertilizante') if hasattr(self, 'initial_data') else getattr(self.instance, 'tipo_fertilizante', None) if self.instance else None
+
+        if tipo_fertilizante == 'QUIMICO' and not value:
+            raise serializers.ValidationError('Los fertilizantes químicos requieren fecha de vencimiento')
+
+        if value and value < date.today():
+            raise serializers.ValidationError('La fecha de vencimiento no puede ser en el pasado')
+        return value
+
+    def validate_cantidad(self, value):
+        """Validación de cantidad"""
+        if value < 0:
+            raise serializers.ValidationError('La cantidad no puede ser negativa')
+        return value
+
+    def validate_precio_unitario(self, value):
+        """Validación de precio unitario"""
+        if value <= 0:
+            raise serializers.ValidationError('El precio unitario debe ser mayor a 0')
+        return value
+
+    def validate_materia_orgánica(self, value):
+        """Validación de materia orgánica"""
+        if value is not None and (value < 0 or value > 100):
+            raise serializers.ValidationError('La materia orgánica debe estar entre 0 y 100%')
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        estado = data.get('estado')
+        cantidad = data.get('cantidad')
+        tipo_fertilizante = data.get('tipo_fertilizante')
+        materia_orgánica = data.get('materia_orgánica')
+
+        if estado == 'AGOTADO' and cantidad != 0:
+            raise serializers.ValidationError({
+                'cantidad': 'Un fertilizante agotado debe tener cantidad 0'
+            })
+
+        if tipo_fertilizante == 'ORGANICO' and materia_orgánica is None:
+            raise serializers.ValidationError({
+                'materia_orgánica': 'Los fertilizantes orgánicos requieren especificar materia orgánica'
+            })
+
+        return data

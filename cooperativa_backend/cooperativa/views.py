@@ -3,6 +3,8 @@ from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.filters import OrderingFilter
 from django.contrib.auth import authenticate, login, logout
 from django.utils import timezone
 from django.middleware.csrf import get_token
@@ -11,10 +13,12 @@ from django.utils.decorators import method_decorator
 from django.db.models import Q, Count, Sum, Avg, F, Case, When, DecimalField
 from django.db.models.functions import TruncMonth
 from django.contrib.sessions.models import Session
+from decimal import Decimal
 from .models import (
     Rol, Usuario, UsuarioRol, Comunidad, Socio,
     Parcela, Cultivo, BitacoraAuditoria,
-    CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela
+    CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
+    Semilla, Pesticida, Fertilizante
 )
 from .serializers import (
     RolSerializer, UsuarioSerializer, UsuarioCreateSerializer,
@@ -22,7 +26,7 @@ from .serializers import (
     SocioCreateSerializer, SocioCreateSimpleSerializer, SocioUpdateSerializer, ParcelaSerializer, CultivoSerializer,
     BitacoraAuditoriaSerializer, CicloCultivoSerializer,
     CosechaSerializer, TratamientoSerializer, AnalisisSueloSerializer,
-    TransferenciaParcelaSerializer
+    TransferenciaParcelaSerializer, SemillaSerializer, PesticidaSerializer, FertilizanteSerializer
 )
 
 
@@ -2674,3 +2678,802 @@ def buscar_parcelas_avanzado(request):
         'total_pages': (total_count + page_size - 1) // page_size,
         'results': serializer.data
     })
+
+
+# CU7: Gestión de Semillas
+# ========================
+
+class SemillaPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class SemillaViewSet(viewsets.ModelViewSet):
+    """
+    CU7: ViewSet para gestión completa de semillas del inventario
+    T-40: Implementar el catálogo de inventario de Semillas
+    T-41: CRUD de Semillas (especie, variedad, cantidad, vencimiento, PG%)
+    """
+    queryset = Semilla.objects.all()
+    serializer_class = SemillaSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [OrderingFilter]
+    ordering_fields = ['especie', 'variedad', 'cantidad', 'fecha_vencimiento', 'porcentaje_germinacion', 'creado_en']
+    ordering = ['-creado_en']  # Orden por defecto
+    pagination_class = SemillaPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtros de búsqueda
+        especie = self.request.query_params.get('especie', '').strip()
+        variedad = self.request.query_params.get('variedad', '').strip()
+        estado = self.request.query_params.get('estado', '').strip()
+        proveedor = self.request.query_params.get('proveedor', '').strip()
+        lote = self.request.query_params.get('lote', '').strip()
+        ubicacion = self.request.query_params.get('ubicacion', '').strip()
+        fecha_vencimiento_desde = self.request.query_params.get('fecha_vencimiento_desde')
+        fecha_vencimiento_hasta = self.request.query_params.get('fecha_vencimiento_hasta')
+        porcentaje_germinacion_min = self.request.query_params.get('pg_min')
+        porcentaje_germinacion_max = self.request.query_params.get('pg_max')
+
+        if especie:
+            queryset = queryset.filter(especie__icontains=especie)
+        if variedad:
+            queryset = queryset.filter(variedad__icontains=variedad)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if proveedor:
+            queryset = queryset.filter(proveedor__icontains=proveedor)
+        if lote:
+            queryset = queryset.filter(lote__icontains=lote)
+        if ubicacion:
+            queryset = queryset.filter(ubicacion_almacen__icontains=ubicacion)
+        if fecha_vencimiento_desde:
+            queryset = queryset.filter(fecha_vencimiento__gte=fecha_vencimiento_desde)
+        if fecha_vencimiento_hasta:
+            queryset = queryset.filter(fecha_vencimiento__lte=fecha_vencimiento_hasta)
+        if porcentaje_germinacion_min:
+            queryset = queryset.filter(porcentaje_germinacion__gte=porcentaje_germinacion_min)
+        if porcentaje_germinacion_max:
+            queryset = queryset.filter(porcentaje_germinacion__lte=porcentaje_germinacion_max)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        # Registrar en bitácora
+        semilla = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR_SEMILLA',
+            tabla_afectada='Semilla',
+            registro_id=semilla.id,
+            detalles=f'Semilla creada: {semilla.especie} {semilla.variedad or ""}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        # Registrar en bitácora
+        semilla = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR_SEMILLA',
+            tabla_afectada='Semilla',
+            registro_id=semilla.id,
+            detalles=f'Semilla actualizada: {semilla.especie} {semilla.variedad or ""}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_destroy(self, instance):
+        # Registrar en bitácora antes de eliminar
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ELIMINAR_SEMILLA',
+            tabla_afectada='Semilla',
+            registro_id=instance.id,
+            detalles=f'Semilla eliminada: {instance.especie} {instance.variedad or ""}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def actualizar_cantidad(self, request, pk=None):
+        """
+        CU7: Actualizar cantidad de semilla (entrada/salida de inventario)
+        """
+        semilla = self.get_object()
+        cantidad_cambio = request.data.get('cantidad_cambio')
+        motivo = request.data.get('motivo', '').strip()
+
+        if cantidad_cambio is None:
+            return Response(
+                {'error': 'cantidad_cambio es requerido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            cantidad_cambio = Decimal(str(cantidad_cambio))
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'cantidad_cambio debe ser un número válido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        nueva_cantidad = semilla.cantidad + cantidad_cambio
+
+        if nueva_cantidad < 0:
+            return Response(
+                {'error': 'La cantidad resultante no puede ser negativa'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        semilla.cantidad = nueva_cantidad
+        semilla.save()
+
+        # Registrar en bitácora
+        tipo_movimiento = 'ENTRADA' if cantidad_cambio > 0 else 'SALIDA'
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion=f'MOVIMIENTO_INVENTARIO_{tipo_movimiento}',
+            tabla_afectada='Semilla',
+            registro_id=semilla.id,
+            detalles={
+                'tipo_movimiento': tipo_movimiento,
+                'cantidad_cambio': float(cantidad_cambio),
+                'cantidad_anterior': float(semilla.cantidad - cantidad_cambio),
+                'cantidad_nueva': float(semilla.cantidad),
+                'motivo': motivo
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        serializer = self.get_serializer(semilla)
+        return Response({
+            'mensaje': f'Cantidad actualizada exitosamente',
+            'tipo_movimiento': tipo_movimiento,
+            'cantidad_cambio': cantidad_cambio,
+            'semilla': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def marcar_vencida(self, request, pk=None):
+        """
+        CU7: Marcar semilla como vencida
+        """
+        semilla = self.get_object()
+
+        if semilla.estado == 'VENCIDA':
+            return Response(
+                {'error': 'La semilla ya está marcada como vencida'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        semilla.estado = 'VENCIDA'
+        # Usar update para evitar que save() sobrescriba el estado
+        Semilla.objects.filter(pk=semilla.pk).update(estado='VENCIDA')
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='MARCAR_SEMILLA_VENCIDA',
+            tabla_afectada='Semilla',
+            registro_id=semilla.id,
+            detalles=f'Semilla marcada como vencida: {semilla.especie} {semilla.variedad or ""}',
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        # Refrescar el objeto desde BD
+        semilla.refresh_from_db()
+
+        serializer = self.get_serializer(semilla)
+        return Response({
+            'mensaje': 'Semilla marcada como vencida exitosamente',
+            'semilla': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def inventario_bajo(self, request):
+        """
+        CU7: Obtener semillas con inventario bajo
+        """
+        limite = float(request.query_params.get('limite', 10))  # kg por defecto
+
+        semillas = self.get_queryset().filter(
+            cantidad__lte=limite,
+            estado='DISPONIBLE'
+        )
+
+        serializer = self.get_serializer(semillas, many=True)
+        return Response({
+            'count': semillas.count(),
+            'limite': limite,
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def proximas_vencer(self, request):
+        """
+        CU7: Obtener semillas próximas a vencer
+        """
+        dias = int(request.query_params.get('dias', 30))
+
+        # Si dias=0, incluir semillas vencidas y las que vencen hoy
+        if dias == 0:
+            semillas = self.get_queryset().filter(
+                estado__in=['DISPONIBLE', 'VENCIDA']
+            )
+        else:
+            semillas = self.get_queryset().filter(
+                estado='DISPONIBLE'
+            )
+
+        # Filtrar las que están próximas a vencer o vencidas
+        proximas_vencer = []
+        for semilla in semillas:
+            if dias == 0:
+                # Para dias=0, incluir vencidas y las que vencen hoy
+                if semilla.esta_vencida() or semilla.esta_proxima_vencer(0):
+                    proximas_vencer.append(semilla)
+            else:
+                # Para otros días, usar la lógica normal
+                if semilla.esta_proxima_vencer(dias):
+                    proximas_vencer.append(semilla)
+
+        serializer = self.get_serializer(proximas_vencer, many=True)
+        return Response({
+            'count': len(proximas_vencer),
+            'dias': dias,
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def vencidas(self, request):
+        """
+        CU7: Obtener semillas vencidas
+        """
+        semillas = self.get_queryset().filter(
+            estado='VENCIDA'
+        )
+
+        serializer = self.get_serializer(semillas, many=True)
+        return Response({
+            'count': semillas.count(),
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def reporte_inventario(self, request):
+        """
+        CU7: Reporte general del inventario de semillas
+        """
+        from django.db.models import Sum, Count, Avg
+
+        # Estadísticas generales
+        total_semillas = Semilla.objects.count()
+        semillas_disponibles = Semilla.objects.filter(estado='DISPONIBLE').count()
+        semillas_agotadas = Semilla.objects.filter(estado='AGOTADO').count()
+        semillas_vencidas = Semilla.objects.filter(estado='VENCIDA').count()
+        semillas_reservadas = Semilla.objects.filter(estado='RESERVADA').count()
+
+        # Valor total del inventario
+        valor_total = Semilla.objects.filter(
+            estado='DISPONIBLE'
+        ).aggregate(
+            total=Sum(F('cantidad') * F('precio_unitario'), output_field=DecimalField())
+        )['total'] or 0
+
+        # Cantidad total por especie
+        cantidad_por_especie = Semilla.objects.values('especie').annotate(
+            total_cantidad=Sum('cantidad'),
+            num_variedades=Count('id')
+        ).order_by('-total_cantidad')[:10]
+
+        # Semillas por proveedor
+        semillas_por_proveedor = Semilla.objects.values('proveedor').annotate(
+            num_semillas=Count('id'),
+            total_cantidad=Sum('cantidad')
+        ).exclude(proveedor__isnull=True).order_by('-num_semillas')[:10]
+
+        # Promedio de porcentaje de germinación
+        promedio_pg = Semilla.objects.filter(
+            estado='DISPONIBLE'
+        ).aggregate(avg_pg=Avg('porcentaje_germinacion'))['avg_pg'] or 0
+
+        return Response({
+            'resumen': {
+                'total_semillas': total_semillas,
+                'semillas_disponibles': semillas_disponibles,
+                'semillas_agotadas': semillas_agotadas,
+                'semillas_vencidas': semillas_vencidas,
+                'semillas_reservadas': semillas_reservadas,
+                'valor_total_inventario': round(float(valor_total), 2),
+                'promedio_porcentaje_germinacion': round(float(promedio_pg), 2)
+            },
+            'cantidad_por_especie': list(cantidad_por_especie),
+            'semillas_por_proveedor': list(semillas_por_proveedor)
+        })
+
+
+# CU8: Gestión de Insumos Agrícolas
+# ==================================
+
+class PesticidaPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class PesticidaViewSet(viewsets.ModelViewSet):
+    """
+    CU8: ViewSet para gestión completa de pesticidas del inventario
+    T-42: Gestión de Inventario de Pesticidas
+    """
+    queryset = Pesticida.objects.all()
+    serializer_class = PesticidaSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [OrderingFilter]
+    ordering_fields = ['nombre_comercial', 'tipo_pesticida', 'cantidad', 'fecha_vencimiento', 'creado_en']
+    ordering = ['-creado_en']
+    pagination_class = PesticidaPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtros de búsqueda
+        nombre = self.request.query_params.get('nombre', '').strip()
+        tipo = self.request.query_params.get('tipo', '').strip()
+        estado = self.request.query_params.get('estado', '').strip()
+        proveedor = self.request.query_params.get('proveedor', '').strip()
+        lote = self.request.query_params.get('lote', '').strip()
+        ubicacion = self.request.query_params.get('ubicacion', '').strip()
+        fecha_vencimiento_desde = self.request.query_params.get('fecha_vencimiento_desde')
+        fecha_vencimiento_hasta = self.request.query_params.get('fecha_vencimiento_hasta')
+
+        if nombre:
+            queryset = queryset.filter(nombre_comercial__icontains=nombre)
+        if tipo:
+            queryset = queryset.filter(tipo_pesticida=tipo)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if proveedor:
+            queryset = queryset.filter(proveedor__icontains=proveedor)
+        if lote:
+            queryset = queryset.filter(lote__icontains=lote)
+        if ubicacion:
+            queryset = queryset.filter(ubicacion_almacen__icontains=ubicacion)
+        if fecha_vencimiento_desde:
+            queryset = queryset.filter(fecha_vencimiento__gte=fecha_vencimiento_desde)
+        if fecha_vencimiento_hasta:
+            queryset = queryset.filter(fecha_vencimiento__lte=fecha_vencimiento_hasta)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        pesticida = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR_PESTICIDA',
+            tabla_afectada='Pesticida',
+            registro_id=pesticida.id,
+            detalles=f'Pesticida creado: {pesticida.nombre_comercial}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        pesticida = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR_PESTICIDA',
+            tabla_afectada='Pesticida',
+            registro_id=pesticida.id,
+            detalles=f'Pesticida actualizado: {pesticida.nombre_comercial}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_destroy(self, instance):
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ELIMINAR_PESTICIDA',
+            tabla_afectada='Pesticida',
+            registro_id=instance.id,
+            detalles=f'Pesticida eliminado: {instance.nombre_comercial}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def actualizar_cantidad(self, request, pk=None):
+        """Actualizar cantidad de pesticida"""
+        pesticida = self.get_object()
+        cantidad_cambio = request.data.get('cantidad_cambio')
+        motivo = request.data.get('motivo', '').strip()
+
+        if cantidad_cambio is None:
+            return Response(
+                {'error': 'cantidad_cambio es requerido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            cantidad_cambio = Decimal(str(cantidad_cambio))
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'cantidad_cambio debe ser un número válido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        nueva_cantidad = pesticida.cantidad + cantidad_cambio
+        if nueva_cantidad < 0:
+            return Response(
+                {'error': 'La cantidad resultante no puede ser negativa'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        pesticida.cantidad = nueva_cantidad
+        pesticida.save()
+
+        tipo_movimiento = 'ENTRADA' if cantidad_cambio > 0 else 'SALIDA'
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion=f'MOVIMIENTO_INVENTARIO_PESTICIDA_{tipo_movimiento}',
+            tabla_afectada='Pesticida',
+            registro_id=pesticida.id,
+            detalles={
+                'tipo_movimiento': tipo_movimiento,
+                'cantidad_cambio': float(cantidad_cambio),
+                'cantidad_anterior': float(pesticida.cantidad - cantidad_cambio),
+                'cantidad_nueva': float(pesticida.cantidad),
+                'motivo': motivo
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        serializer = self.get_serializer(pesticida)
+        return Response({
+            'mensaje': 'Cantidad actualizada exitosamente',
+            'tipo_movimiento': tipo_movimiento,
+            'cantidad_cambio': cantidad_cambio,
+            'pesticida': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def marcar_vencido(self, request, pk=None):
+        """Marcar pesticida como vencido"""
+        pesticida = self.get_object()
+
+        if pesticida.estado == 'VENCIDO':
+            return Response(
+                {'error': 'El pesticida ya está marcado como vencido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        pesticida.estado = 'VENCIDO'
+        Pesticida.objects.filter(pk=pesticida.pk).update(estado='VENCIDO')
+
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='MARCAR_PESTICIDA_VENCIDO',
+            tabla_afectada='Pesticida',
+            registro_id=pesticida.id,
+            detalles=f'Pesticida marcado como vencido: {pesticida.nombre_comercial}',
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        pesticida.refresh_from_db()
+        serializer = self.get_serializer(pesticida)
+        return Response({
+            'mensaje': 'Pesticida marcado como vencido exitosamente',
+            'pesticida': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def proximos_vencer(self, request):
+        """Obtener pesticidas próximos a vencer"""
+        dias = int(request.query_params.get('dias', 30))
+
+        proximos_vencer = []
+        for pesticida in self.get_queryset().filter(estado='DISPONIBLE'):
+            if pesticida.esta_proximo_vencer(dias):
+                proximos_vencer.append(pesticida)
+
+        serializer = self.get_serializer(proximos_vencer, many=True)
+        return Response({
+            'count': len(proximos_vencer),
+            'dias': dias,
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def vencidos(self, request):
+        """Obtener pesticidas vencidos"""
+        pesticidas = self.get_queryset().filter(estado='VENCIDO')
+        serializer = self.get_serializer(pesticidas, many=True)
+        return Response({
+            'count': pesticidas.count(),
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def reporte_inventario(self, request):
+        """Reporte general del inventario de pesticidas"""
+        from django.db.models import Sum, Count, Avg
+
+        total_pesticidas = Pesticida.objects.count()
+        pesticidas_disponibles = Pesticida.objects.filter(estado='DISPONIBLE').count()
+        pesticidas_agotados = Pesticida.objects.filter(estado='AGOTADO').count()
+        pesticidas_vencidos = Pesticida.objects.filter(estado='VENCIDO').count()
+
+        valor_total = Pesticida.objects.filter(estado='DISPONIBLE').aggregate(
+            total=Sum(F('cantidad') * F('precio_unitario'), output_field=DecimalField())
+        )['total'] or 0
+
+        cantidad_por_tipo = Pesticida.objects.values('tipo_pesticida').annotate(
+            total_cantidad=Sum('cantidad'),
+            num_pesticidas=Count('id')
+        ).order_by('-total_cantidad')
+
+        pesticidas_por_proveedor = Pesticida.objects.values('proveedor').annotate(
+            num_pesticidas=Count('id'),
+            total_cantidad=Sum('cantidad')
+        ).exclude(proveedor__isnull=True).order_by('-num_pesticidas')[:10]
+
+        return Response({
+            'resumen': {
+                'total_pesticidas': total_pesticidas,
+                'pesticidas_disponibles': pesticidas_disponibles,
+                'pesticidas_agotados': pesticidas_agotados,
+                'pesticidas_vencidos': pesticidas_vencidos,
+                'valor_total_inventario': round(float(valor_total), 2)
+            },
+            'cantidad_por_tipo': list(cantidad_por_tipo),
+            'pesticidas_por_proveedor': list(pesticidas_por_proveedor)
+        })
+
+
+class FertilizantePagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class FertilizanteViewSet(viewsets.ModelViewSet):
+    """
+    CU8: ViewSet para gestión completa de fertilizantes del inventario
+    T-45: Gestión de Inventario de Fertilizantes
+    """
+    queryset = Fertilizante.objects.all()
+    serializer_class = FertilizanteSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [OrderingFilter]
+    ordering_fields = ['nombre_comercial', 'tipo_fertilizante', 'cantidad', 'fecha_vencimiento', 'creado_en']
+    ordering = ['-creado_en']
+    pagination_class = FertilizantePagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtros de búsqueda
+        nombre = self.request.query_params.get('nombre', '').strip()
+        tipo = self.request.query_params.get('tipo', '').strip()
+        estado = self.request.query_params.get('estado', '').strip()
+        proveedor = self.request.query_params.get('proveedor', '').strip()
+        lote = self.request.query_params.get('lote', '').strip()
+        ubicacion = self.request.query_params.get('ubicacion', '').strip()
+        fecha_vencimiento_desde = self.request.query_params.get('fecha_vencimiento_desde')
+        fecha_vencimiento_hasta = self.request.query_params.get('fecha_vencimiento_hasta')
+
+        if nombre:
+            queryset = queryset.filter(nombre_comercial__icontains=nombre)
+        if tipo:
+            queryset = queryset.filter(tipo_fertilizante=tipo)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if proveedor:
+            queryset = queryset.filter(proveedor__icontains=proveedor)
+        if lote:
+            queryset = queryset.filter(lote__icontains=lote)
+        if ubicacion:
+            queryset = queryset.filter(ubicacion_almacen__icontains=ubicacion)
+        if fecha_vencimiento_desde:
+            queryset = queryset.filter(fecha_vencimiento__gte=fecha_vencimiento_desde)
+        if fecha_vencimiento_hasta:
+            queryset = queryset.filter(fecha_vencimiento__lte=fecha_vencimiento_hasta)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        fertilizante = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR_FERTILIZANTE',
+            tabla_afectada='Fertilizante',
+            registro_id=fertilizante.id,
+            detalles=f'Fertilizante creado: {fertilizante.nombre_comercial}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        fertilizante = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR_FERTILIZANTE',
+            tabla_afectada='Fertilizante',
+            registro_id=fertilizante.id,
+            detalles=f'Fertilizante actualizado: {fertilizante.nombre_comercial}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_destroy(self, instance):
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ELIMINAR_FERTILIZANTE',
+            tabla_afectada='Fertilizante',
+            registro_id=instance.id,
+            detalles=f'Fertilizante eliminado: {instance.nombre_comercial}',
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def actualizar_cantidad(self, request, pk=None):
+        """Actualizar cantidad de fertilizante"""
+        fertilizante = self.get_object()
+        cantidad_cambio = request.data.get('cantidad_cambio')
+        motivo = request.data.get('motivo', '').strip()
+
+        if cantidad_cambio is None:
+            return Response(
+                {'error': 'cantidad_cambio es requerido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            cantidad_cambio = Decimal(str(cantidad_cambio))
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'cantidad_cambio debe ser un número válido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        nueva_cantidad = fertilizante.cantidad + cantidad_cambio
+        if nueva_cantidad < 0:
+            return Response(
+                {'error': 'La cantidad resultante no puede ser negativa'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        fertilizante.cantidad = nueva_cantidad
+        fertilizante.save()
+
+        tipo_movimiento = 'ENTRADA' if cantidad_cambio > 0 else 'SALIDA'
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion=f'MOVIMIENTO_INVENTARIO_FERTILIZANTE_{tipo_movimiento}',
+            tabla_afectada='Fertilizante',
+            registro_id=fertilizante.id,
+            detalles={
+                'tipo_movimiento': tipo_movimiento,
+                'cantidad_cambio': float(cantidad_cambio),
+                'cantidad_anterior': float(fertilizante.cantidad - cantidad_cambio),
+                'cantidad_nueva': float(fertilizante.cantidad),
+                'motivo': motivo
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        serializer = self.get_serializer(fertilizante)
+        return Response({
+            'mensaje': 'Cantidad actualizada exitosamente',
+            'tipo_movimiento': tipo_movimiento,
+            'cantidad_cambio': cantidad_cambio,
+            'fertilizante': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def marcar_vencido(self, request, pk=None):
+        """Marcar fertilizante como vencido"""
+        fertilizante = self.get_object()
+
+        if fertilizante.estado == 'VENCIDO':
+            return Response(
+                {'error': 'El fertilizante ya está marcado como vencido'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        fertilizante.estado = 'VENCIDO'
+        Fertilizante.objects.filter(pk=fertilizante.pk).update(estado='VENCIDO')
+
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='MARCAR_FERTILIZANTE_VENCIDO',
+            tabla_afectada='Fertilizante',
+            registro_id=fertilizante.id,
+            detalles=f'Fertilizante marcado como vencido: {fertilizante.nombre_comercial}',
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        fertilizante.refresh_from_db()
+        serializer = self.get_serializer(fertilizante)
+        return Response({
+            'mensaje': 'Fertilizante marcado como vencido exitosamente',
+            'fertilizante': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def proximos_vencer(self, request):
+        """Obtener fertilizantes próximos a vencer"""
+        dias = int(request.query_params.get('dias', 30))
+
+        proximos_vencer = []
+        for fertilizante in self.get_queryset().filter(estado='DISPONIBLE'):
+            if fertilizante.esta_proximo_vencer(dias):
+                proximos_vencer.append(fertilizante)
+
+        serializer = self.get_serializer(proximos_vencer, many=True)
+        return Response({
+            'count': len(proximos_vencer),
+            'dias': dias,
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def vencidos(self, request):
+        """Obtener fertilizantes vencidos"""
+        fertilizantes = self.get_queryset().filter(estado='VENCIDO')
+        serializer = self.get_serializer(fertilizantes, many=True)
+        return Response({
+            'count': fertilizantes.count(),
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def reporte_inventario(self, request):
+        """Reporte general del inventario de fertilizantes"""
+        from django.db.models import Sum, Count, Avg
+
+        total_fertilizantes = Fertilizante.objects.count()
+        fertilizantes_disponibles = Fertilizante.objects.filter(estado='DISPONIBLE').count()
+        fertilizantes_agotados = Fertilizante.objects.filter(estado='AGOTADO').count()
+        fertilizantes_vencidos = Fertilizante.objects.filter(estado='VENCIDO').count()
+
+        valor_total = Fertilizante.objects.filter(estado='DISPONIBLE').aggregate(
+            total=Sum(F('cantidad') * F('precio_unitario'), output_field=DecimalField())
+        )['total'] or 0
+
+        cantidad_por_tipo = Fertilizante.objects.values('tipo_fertilizante').annotate(
+            total_cantidad=Sum('cantidad'),
+            num_fertilizantes=Count('id')
+        ).order_by('-total_cantidad')
+
+        fertilizantes_por_proveedor = Fertilizante.objects.values('proveedor').annotate(
+            num_fertilizantes=Count('id'),
+            total_cantidad=Sum('cantidad')
+        ).exclude(proveedor__isnull=True).order_by('-num_fertilizantes')[:10]
+
+        return Response({
+            'resumen': {
+                'total_fertilizantes': total_fertilizantes,
+                'fertilizantes_disponibles': fertilizantes_disponibles,
+                'fertilizantes_agotados': fertilizantes_agotados,
+                'fertilizantes_vencidos': fertilizantes_vencidos,
+                'valor_total_inventario': round(float(valor_total), 2)
+            },
+            'cantidad_por_tipo': list(cantidad_por_tipo),
+            'fertilizantes_por_proveedor': list(fertilizantes_por_proveedor)
+        })

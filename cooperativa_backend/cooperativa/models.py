@@ -573,7 +573,7 @@ class Parcela(models.Model):
         help_text='Latitud en grados decimales'
     )
     longitud = models.DecimalField(
-        max_digits=11,
+        max_digits=10,
         decimal_places=8,
         blank=True,
         null=True,
@@ -838,8 +838,7 @@ class Tratamiento(models.Model):
     TIPOS_TRATAMIENTO = [
         ('FERTILIZANTE', 'Fertilizante'),
         ('PESTICIDA', 'Pesticida'),
-        ('HERBICIDA', 'Herbicida'),
-        ('FUNGICIDA', 'Fungicida'),
+        ('HERBICIDA', 'Fungicida'),
         ('REGULADOR', 'Regulador de Crecimiento'),
         ('RIEGO', 'Riego'),
         ('LABOR', 'Labor Cultural'),
@@ -1124,3 +1123,535 @@ class BitacoraAuditoria(models.Model):
 
     def __str__(self):
         return f"{self.accion} en {self.tabla_afectada} - {self.fecha}"
+
+
+class Semilla(models.Model):
+    """CU7: Modelo para gestión de semillas del inventario"""
+    ESTADOS = [
+        ('DISPONIBLE', 'Disponible'),
+        ('AGOTADA', 'Agotada'),
+        ('VENCIDA', 'Vencida'),
+        ('RESERVADA', 'Reservada'),
+    ]
+
+    especie = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ\s\-\.]+$',
+            message='Especie solo puede contener letras, espacios, guiones y puntos'
+        )],
+        help_text='Especie de la semilla (ej: Maíz, Trigo, Soya)'
+    )
+    variedad = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.]+$',
+            message='Variedad solo puede contener letras, números, espacios, guiones y puntos'
+        )],
+        help_text='Variedad específica de la semilla'
+    )
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='La cantidad no puede ser negativa')],
+        help_text='Cantidad disponible en kilogramos'
+    )
+    unidad_medida = models.CharField(
+        max_length=20,
+        default='kg',
+        help_text='Unidad de medida (kg, g, toneladas, etc.)'
+    )
+    fecha_vencimiento = models.DateField(
+        help_text='Fecha de vencimiento de la semilla'
+    )
+    porcentaje_germinacion = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        validators=[
+            MinValueValidator(0, message='El porcentaje no puede ser negativo'),
+            MaxValueValidator(100, message='El porcentaje no puede exceder 100%')
+        ],
+        help_text='Porcentaje de germinación (%)'
+    )
+    lote = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text='Número de lote del proveedor'
+    )
+    proveedor = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Nombre del proveedor'
+    )
+    precio_unitario = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio unitario por kilogramo'
+    )
+    ubicacion_almacen = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Ubicación física en el almacén'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS,
+        default='DISPONIBLE',
+        help_text='Estado actual de la semilla'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones adicionales'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'semilla'
+        verbose_name = 'Semilla'
+        verbose_name_plural = 'Semillas'
+        ordering = ['-creado_en']
+        unique_together = ('especie', 'variedad', 'lote')
+
+    def __str__(self):
+        variedad_str = f" - {self.variedad}" if self.variedad else ""
+        lote_str = f" (Lote: {self.lote})" if self.lote else ""
+        return f"{self.especie}{variedad_str}{lote_str}"
+
+    def clean(self):
+        """Validaciones adicionales del modelo"""
+        # Validar que la fecha de vencimiento no sea en el pasado
+        from datetime import date
+        if self.fecha_vencimiento and self.fecha_vencimiento < date.today():
+            # Solo validar si no está ya vencida (para evitar problemas al editar registros existentes)
+            if self.estado != 'VENCIDA':
+                raise ValidationError('La fecha de vencimiento no puede ser en el pasado')
+
+        # Validar que si está agotada, cantidad debe ser 0
+        if self.estado == 'AGOTADA' and self.cantidad > 0:
+            raise ValidationError('Una semilla agotada debe tener cantidad 0')
+
+        # Validar que si cantidad es 0, estado debe ser AGOTADA
+        if self.cantidad == 0 and self.estado == 'DISPONIBLE':
+            raise ValidationError('Una semilla con cantidad 0 debe estar marcada como agotada')
+
+    def save(self, *args, **kwargs):
+        # Actualizar estado basado en cantidad y fecha de vencimiento
+        from datetime import date
+        hoy = date.today()
+
+        if self.cantidad == 0:
+            self.estado = 'AGOTADA'
+        elif self.fecha_vencimiento and self.fecha_vencimiento < hoy:
+            self.estado = 'VENCIDA'
+        elif self.estado not in ['RESERVADA']:
+            self.estado = 'DISPONIBLE'
+
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+    def valor_total(self):
+        """Calcula el valor total del inventario de esta semilla"""
+        if self.precio_unitario:
+            return self.cantidad * self.precio_unitario
+        return 0
+
+    def dias_para_vencer(self):
+        """Calcula días restantes para vencer"""
+        from datetime import date
+        if self.fecha_vencimiento:
+            return (self.fecha_vencimiento - date.today()).days
+        return None
+
+    def esta_proxima_vencer(self, dias=30):
+        """Verifica si la semilla está próxima a vencer"""
+        dias_restantes = self.dias_para_vencer()
+        return dias_restantes is not None and 0 <= dias_restantes <= dias
+
+    def esta_vencida(self):
+        """Verifica si la semilla está vencida"""
+        from datetime import date
+        return self.fecha_vencimiento and self.fecha_vencimiento < date.today()
+
+
+class Pesticida(models.Model):
+    """CU8: Modelo para gestión de pesticidas del inventario agrícola"""
+    TIPOS_PESTICIDA = [
+        ('INSECTICIDA', 'Insecticida'),
+        ('FUNGICIDA', 'Fungicida'),
+        ('HERBICIDA', 'Herbicida'),
+        ('NEMATICIDA', 'Nematicida'),
+        ('ACARICIDA', 'Acaricida'),
+        ('BACTERICIDA', 'Bactericida'),
+        ('MOLUSQUICIDA', 'Molusquicida'),
+        ('RODENTICIDA', 'Rodenticida'),
+        ('OTRO', 'Otro'),
+    ]
+
+    ESTADOS = [
+        ('DISPONIBLE', 'Disponible'),
+        ('AGOTADO', 'Agotado'),
+        ('VENCIDO', 'Vencido'),
+        ('EN_CUARENTENA', 'En Cuarentena'),
+        ('RECHAZADO', 'Rechazado'),
+    ]
+
+    nombre_comercial = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\(\)]+$',
+            message='Nombre comercial solo puede contener letras, números, espacios, guiones, puntos y paréntesis'
+        )],
+        help_text='Nombre comercial del pesticida'
+    )
+    ingrediente_activo = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\(\)\+]+$',
+            message='Ingrediente activo solo puede contener letras, números, espacios, guiones, puntos, paréntesis y signo más'
+        )],
+        help_text='Principio activo del pesticida'
+    )
+    tipo_pesticida = models.CharField(
+        max_length=20,
+        choices=TIPOS_PESTICIDA,
+        help_text='Tipo de pesticida'
+    )
+    concentracion = models.CharField(
+        max_length=50,
+        validators=[RegexValidator(
+            regex=r'^[0-9\.\,\s\%\-\(\)a-zA-Z\+]+$',
+            message='Concentración debe tener formato válido (ej: 50%% WP, 200 g/L)'
+        )],
+        help_text='Concentración del ingrediente activo'
+    )
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='La cantidad no puede ser negativa')],
+        help_text='Cantidad disponible'
+    )
+    unidad_medida = models.CharField(
+        max_length=20,
+        default='L',
+        help_text='Unidad de medida (L, kg, ml, g, etc.)'
+    )
+    fecha_vencimiento = models.DateField(
+        help_text='Fecha de vencimiento del pesticida'
+    )
+    lote = models.CharField(
+        max_length=50,
+        unique=True,
+        validators=[RegexValidator(
+            regex=r'^[A-Z0-9\-_\.]+$',
+            message='Lote solo puede contener letras mayúsculas, números, guiones, guiones bajos y puntos'
+        )],
+        help_text='Número único del lote'
+    )
+    proveedor = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\&\(\)]+$',
+            message='Proveedor solo puede contener letras, números, espacios y caracteres especiales limitados'
+        )],
+        help_text='Nombre del proveedor'
+    )
+    precio_unitario = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio unitario'
+    )
+    ubicacion_almacen = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\/]+$',
+            message='Ubicación solo puede contener letras, números, espacios, guiones, puntos y barras'
+        )],
+        help_text='Ubicación física en el almacén'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS,
+        default='DISPONIBLE',
+        help_text='Estado actual del pesticida'
+    )
+    registro_sanitario = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text='Número de registro sanitario'
+    )
+    dosis_recomendada = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text='Dosis recomendada por hectárea'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones adicionales'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pesticida'
+        verbose_name = 'Pesticida'
+        verbose_name_plural = 'Pesticidas'
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"{self.nombre_comercial} - {self.ingrediente_activo} (Lote: {self.lote})"
+
+    def clean(self):
+        """Validaciones adicionales del modelo"""
+        # Validar que la fecha de vencimiento no sea en el pasado para nuevos registros
+        from datetime import date
+        if not self.pk and self.fecha_vencimiento and self.fecha_vencimiento < date.today():
+            raise ValidationError('La fecha de vencimiento no puede ser en el pasado')
+
+        # Validar que si está agotado, cantidad debe ser 0
+        if self.estado == 'AGOTADO' and self.cantidad != 0:
+            raise ValidationError('Si el pesticida está agotado, la cantidad debe ser 0')
+
+        # Validar que si está vencido, estado debe ser VENCIDO
+        if self.esta_vencido() and self.estado not in ['VENCIDO', 'RECHAZADO']:
+            raise ValidationError('El pesticida está vencido. El estado debe ser VENCIDO o RECHAZADO')
+
+    def save(self, *args, **kwargs):
+        # Actualizar estado basado en cantidad y fecha de vencimiento
+        from datetime import date
+        hoy = date.today()
+
+        if self.cantidad == 0 and self.estado == 'DISPONIBLE':
+            self.estado = 'AGOTADO'
+        elif self.esta_vencido() and self.estado not in ['VENCIDO', 'RECHAZADO']:
+            self.estado = 'VENCIDO'
+
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+    def valor_total(self):
+        """Calcula el valor total del inventario de este pesticida"""
+        return self.cantidad * self.precio_unitario
+
+    def dias_para_vencer(self):
+        """Calcula días restantes para vencer"""
+        from datetime import date
+        if self.fecha_vencimiento:
+            return (self.fecha_vencimiento - date.today()).days
+        return None
+
+    def esta_proximo_vencer(self, dias=30):
+        """Verifica si el pesticida está próximo a vencer"""
+        dias_restantes = self.dias_para_vencer()
+        return dias_restantes is not None and 0 <= dias_restantes <= dias
+
+    def esta_vencido(self):
+        """Verifica si el pesticida está vencido"""
+        from datetime import date
+        return self.fecha_vencimiento and self.fecha_vencimiento < date.today()
+
+
+class Fertilizante(models.Model):
+    """CU8: Modelo para gestión de fertilizantes del inventario agrícola"""
+    TIPOS_FERTILIZANTE = [
+        ('QUIMICO', 'Químico'),
+        ('ORGANICO', 'Orgánico'),
+        ('FOLIARES', 'Foliares'),
+        ('RAIZ', 'De raíz'),
+        ('MICRONUTRIENTES', 'Micronutrientes'),
+        ('CALCAREO', 'Calcareo'),
+        ('OTRO', 'Otro'),
+    ]
+
+    ESTADOS = [
+        ('DISPONIBLE', 'Disponible'),
+        ('AGOTADO', 'Agotado'),
+        ('VENCIDO', 'Vencido'),
+        ('EN_CUARENTENA', 'En Cuarentena'),
+        ('RECHAZADO', 'Rechazado'),
+    ]
+
+    nombre_comercial = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\(\)\%]+$',
+            message='Nombre comercial solo puede contener letras, números, espacios, guiones, puntos, paréntesis y porcentaje'
+        )],
+        help_text='Nombre comercial del fertilizante'
+    )
+    tipo_fertilizante = models.CharField(
+        max_length=20,
+        choices=TIPOS_FERTILIZANTE,
+        help_text='Tipo de fertilizante'
+    )
+    composicion_npk = models.CharField(
+        max_length=20,
+        validators=[RegexValidator(
+            regex=r'^[0-9\-]+-[0-9\-]+-[0-9\-]+(\+[0-9]+)?$',
+            message='Composición NPK debe tener formato N-P-K (ej: 10-10-10, 20-10-10+5)'
+        )],
+        help_text='Composición NPK (ej: 10-10-10)'
+    )
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='La cantidad no puede ser negativa')],
+        help_text='Cantidad disponible'
+    )
+    unidad_medida = models.CharField(
+        max_length=20,
+        default='kg',
+        help_text='Unidad de medida (kg, toneladas, L, etc.)'
+    )
+    fecha_vencimiento = models.DateField(
+        blank=True,
+        null=True,
+        help_text='Fecha de vencimiento del fertilizante (opcional para orgánicos)'
+    )
+    lote = models.CharField(
+        max_length=50,
+        unique=True,
+        validators=[RegexValidator(
+            regex=r'^[A-Z0-9\-_\.]+$',
+            message='Lote solo puede contener letras mayúsculas, números, guiones, guiones bajos y puntos'
+        )],
+        help_text='Número único del lote'
+    )
+    proveedor = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\&\(\)]+$',
+            message='Proveedor solo puede contener letras, números, espacios y caracteres especiales limitados'
+        )],
+        help_text='Nombre del proveedor'
+    )
+    precio_unitario = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio unitario'
+    )
+    ubicacion_almacen = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\/]+$',
+            message='Ubicación solo puede contener letras, números, espacios, guiones, puntos y barras'
+        )],
+        help_text='Ubicación física en el almacén'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS,
+        default='DISPONIBLE',
+        help_text='Estado actual del fertilizante'
+    )
+    dosis_recomendada = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text='Dosis recomendada por hectárea'
+    )
+    materia_orgánica = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[
+            MinValueValidator(0, message='La materia orgánica no puede ser negativa'),
+            MaxValueValidator(100, message='La materia orgánica no puede exceder 100%')
+        ],
+        help_text='Porcentaje de materia orgánica (para fertilizantes orgánicos)'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones adicionales'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fertilizante'
+        verbose_name = 'Fertilizante'
+        verbose_name_plural = 'Fertilizantes'
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"{self.nombre_comercial} - {self.composicion_npk} (Lote: {self.lote})"
+
+    def clean(self):
+        """Validaciones adicionales del modelo"""
+        # Validar fecha de vencimiento solo para fertilizantes químicos
+        from datetime import date
+        if self.tipo_fertilizante == 'QUIMICO' and not self.fecha_vencimiento:
+            raise ValidationError('Los fertilizantes químicos requieren fecha de vencimiento')
+
+        if self.fecha_vencimiento and self.fecha_vencimiento < date.today():
+            if self.estado not in ['VENCIDO', 'RECHAZADO']:
+                raise ValidationError('El fertilizante está vencido. El estado debe ser VENCIDO o RECHAZADO')
+
+        # Validar que si está agotado, cantidad debe ser 0
+        if self.estado == 'AGOTADO' and self.cantidad != 0:
+            raise ValidationError('Si el fertilizante está agotado, la cantidad debe ser 0')
+
+        # Validar materia orgánica solo para orgánicos
+        if self.tipo_fertilizante == 'ORGANICO' and self.materia_orgánica is None:
+            raise ValidationError('Los fertilizantes orgánicos requieren especificar materia orgánica')
+
+    def save(self, *args, **kwargs):
+        # Actualizar estado basado en cantidad y fecha de vencimiento
+        from datetime import date
+        hoy = date.today()
+
+        if self.cantidad == 0 and self.estado == 'DISPONIBLE':
+            self.estado = 'AGOTADO'
+        elif self.fecha_vencimiento and self.fecha_vencimiento < hoy and self.estado not in ['VENCIDO', 'RECHAZADO']:
+            self.estado = 'VENCIDO'
+
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+    def valor_total(self):
+        """Calcula el valor total del inventario de este fertilizante"""
+        return self.cantidad * self.precio_unitario
+
+    def dias_para_vencer(self):
+        """Calcula días restantes para vencer"""
+        from datetime import date
+        if self.fecha_vencimiento:
+            return (self.fecha_vencimiento - date.today()).days
+        return None
+
+    def esta_proximo_vencer(self, dias=30):
+        """Verifica si el fertilizante está próximo a vencer"""
+        dias_restantes = self.dias_para_vencer()
+        return dias_restantes is not None and 0 <= dias_restantes <= dias
+
+    def esta_vencido(self):
+        """Verifica si el fertilizante está vencido"""
+        from datetime import date
+        return self.fecha_vencimiento and self.fecha_vencimiento < date.today()
+
+    def get_npk_values(self):
+        """Extrae valores N, P, K de la composición"""
+        try:
+            partes = self.composicion_npk.split('-')
+            n = int(partes[0]) if partes[0] != '' else 0
+            p = int(partes[1]) if partes[1] != '' else 0
+            k = int(partes[2].split('+')[0]) if partes[2] != '' else 0
+            return {'N': n, 'P': p, 'K': k}
+        except (ValueError, IndexError):
+            return None

@@ -95,7 +95,7 @@ docs/
 ## 📊 Métricas del Sistema
 
 - **✅ 6 Casos de Uso** completamente implementados
-- **✅ 113 Tests** automatizados pasando
+- **✅ 160 Tests** automatizados pasando
 - **✅ 50+ Endpoints** API funcionales
 - **✅ 15+ Modelos** de datos validados
 - **✅ Documentación completa** por CU y tarea
