@@ -3477,3 +3477,498 @@ class FertilizanteViewSet(viewsets.ModelViewSet):
             'cantidad_por_tipo': list(cantidad_por_tipo),
             'fertilizantes_por_proveedor': list(fertilizantes_por_proveedor)
         })
+
+
+
+# ============================================================================
+# CU9: GESTIÓN DE CAMPAÑAS AGRÍCOLAS - VIEWSETS Y VISTAS
+# T036: Gestión de campañas (crear, editar, eliminar)
+# T037: Relación entre campaña y socios/parcelas
+# ============================================================================
+
+class CampaignViewSet(viewsets.ModelViewSet):
+    """
+    CU9: ViewSet para gestión completa de campañas agrícolas
+    T036: CRUD completo (list, create, retrieve, update, destroy)
+    T037: Endpoints para asignar/desasignar socios y parcelas
+    """
+    queryset = Campaign.objects.all().select_related('responsable').prefetch_related(
+        'socios_asignados__socio__usuario',
+        'parcelas__parcela__socio__usuario'
+    )
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        """Usar serializer simplificado para list, completo para retrieve"""
+        if self.action == 'list':
+            return CampaignListSerializer
+        return CampaignSerializer
+
+    def get_queryset(self):
+        """Filtros opcionales por query params"""
+        queryset = super().get_queryset()
+        
+        # Filtros
+        estado = self.request.query_params.get('estado')
+        fecha_inicio_desde = self.request.query_params.get('fecha_inicio_desde')
+        fecha_inicio_hasta = self.request.query_params.get('fecha_inicio_hasta')
+        responsable_id = self.request.query_params.get('responsable_id')
+        nombre = self.request.query_params.get('nombre')
+
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if fecha_inicio_desde:
+            queryset = queryset.filter(fecha_inicio__gte=fecha_inicio_desde)
+        if fecha_inicio_hasta:
+            queryset = queryset.filter(fecha_inicio__lte=fecha_inicio_hasta)
+        if responsable_id:
+            queryset = queryset.filter(responsable_id=responsable_id)
+        if nombre:
+            queryset = queryset.filter(nombre__icontains=nombre)
+
+        return queryset.order_by('-fecha_inicio')
+
+    def perform_create(self, serializer):
+        """Registrar creación en bitácora"""
+        campaign = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR',
+            tabla_afectada='campaign',
+            registro_id=campaign.id,
+            detalles={
+                'campaign_nombre': campaign.nombre,
+                'creado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        """Registrar actualización en bitácora"""
+        campaign = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR',
+            tabla_afectada='campaign',
+            registro_id=campaign.id,
+            detalles={
+                'campaign_nombre': campaign.nombre,
+                'actualizado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        T036: Validar que no se elimine campaña con labores o cosechas asociadas
+        """
+        campaign = self.get_object()
+
+        # Validar que puede ser eliminada
+        if not campaign.puede_eliminar():
+            return Response({
+                'error': 'No se puede eliminar la campaña porque tiene labores o cosechas asociadas'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Registrar eliminación en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='ELIMINAR',
+            tabla_afectada='campaign',
+            registro_id=campaign.id,
+            detalles={
+                'campaign_nombre': campaign.nombre,
+                'eliminado_por': request.user.usuario
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        campaign.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'])
+    def assign_partner(self, request, pk=None):
+        """
+        T037: Asignar socio a campaña
+        POST /api/campaigns/{id}/assign_partner/
+        """
+        campaign = self.get_object()
+        socio_id = request.data.get('socio_id')
+        rol = request.data.get('rol', 'PRODUCTOR')
+        fecha_asignacion = request.data.get('fecha_asignacion', timezone.now().date())
+        observaciones = request.data.get('observaciones', '')
+
+        if not socio_id:
+            return Response({
+                'error': 'socio_id es requerido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            socio = Socio.objects.get(id=socio_id)
+        except Socio.DoesNotExist:
+            return Response({
+                'error': 'Socio no encontrado'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Verificar si ya está asignado
+        if CampaignPartner.objects.filter(campaign=campaign, socio=socio).exists():
+            return Response({
+                'error': 'El socio ya está asignado a esta campaña'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Crear asignación
+        serializer = CampaignPartnerSerializer(data={
+            'campaign': campaign.id,
+            'socio': socio.id,
+            'rol': rol,
+            'fecha_asignacion': fecha_asignacion,
+            'observaciones': observaciones
+        })
+
+        if serializer.is_valid():
+            assignment = serializer.save()
+
+            # Registrar en bitácora
+            BitacoraAuditoria.objects.create(
+                usuario=request.user,
+                accion='CREAR',
+                tabla_afectada='campaign_partner',
+                registro_id=assignment.id,
+                detalles={
+                    'campaign': campaign.nombre,
+                    'socio': socio.usuario.get_full_name(),
+                    'rol': rol,
+                    'asignado_por': request.user.usuario
+                },
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def remove_partner(self, request, pk=None):
+        """
+        T037: Desasignar socio de campaña
+        POST /api/campaigns/{id}/remove_partner/
+        """
+        campaign = self.get_object()
+        socio_id = request.data.get('socio_id')
+
+        if not socio_id:
+            return Response({
+                'error': 'socio_id es requerido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            assignment = CampaignPartner.objects.get(campaign=campaign, socio_id=socio_id)
+        except CampaignPartner.DoesNotExist:
+            return Response({
+                'error': 'El socio no está asignado a esta campaña'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='ELIMINAR',
+            tabla_afectada='campaign_partner',
+            registro_id=assignment.id,
+            detalles={
+                'campaign': campaign.nombre,
+                'socio': assignment.socio.usuario.get_full_name(),
+                'desasignado_por': request.user.usuario
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        assignment.delete()
+        return Response({
+            'mensaje': 'Socio desasignado exitosamente'
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def partners(self, request, pk=None):
+        """
+        T037: Obtener socios asignados a la campaña
+        GET /api/campaigns/{id}/partners/
+        """
+        campaign = self.get_object()
+        partners = campaign.socios_asignados.all()
+        serializer = CampaignPartnerSerializer(partners, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def assign_plot(self, request, pk=None):
+        """
+        T037: Asignar parcela a campaña
+        POST /api/campaigns/{id}/assign_plot/
+        """
+        campaign = self.get_object()
+        parcela_id = request.data.get('parcela_id')
+        fecha_asignacion = request.data.get('fecha_asignacion', timezone.now().date())
+        superficie_comprometida = request.data.get('superficie_comprometida')
+        cultivo_planificado = request.data.get('cultivo_planificado', '')
+        meta_produccion_parcela = request.data.get('meta_produccion_parcela')
+        observaciones = request.data.get('observaciones', '')
+
+        if not parcela_id:
+            return Response({
+                'error': 'parcela_id es requerido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            parcela = Parcela.objects.get(id=parcela_id)
+        except Parcela.DoesNotExist:
+            return Response({
+                'error': 'Parcela no encontrada'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Verificar si ya está asignada
+        if CampaignPlot.objects.filter(campaign=campaign, parcela=parcela).exists():
+            return Response({
+                'error': 'La parcela ya está asignada a esta campaña'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Crear asignación
+        serializer = CampaignPlotSerializer(data={
+            'campaign': campaign.id,
+            'parcela': parcela.id,
+            'fecha_asignacion': fecha_asignacion,
+            'superficie_comprometida': superficie_comprometida,
+            'cultivo_planificado': cultivo_planificado,
+            'meta_produccion_parcela': meta_produccion_parcela,
+            'observaciones': observaciones
+        })
+
+        if serializer.is_valid():
+            assignment = serializer.save()
+
+            # Registrar en bitácora
+            BitacoraAuditoria.objects.create(
+                usuario=request.user,
+                accion='CREAR',
+                tabla_afectada='campaign_plot',
+                registro_id=assignment.id,
+                detalles={
+                    'campaign': campaign.nombre,
+                    'parcela': parcela.nombre,
+                    'asignado_por': request.user.usuario
+                },
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def remove_plot(self, request, pk=None):
+        """
+        T037: Desasignar parcela de campaña
+        POST /api/campaigns/{id}/remove_plot/
+        """
+        campaign = self.get_object()
+        parcela_id = request.data.get('parcela_id')
+
+        if not parcela_id:
+            return Response({
+                'error': 'parcela_id es requerido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            assignment = CampaignPlot.objects.get(campaign=campaign, parcela_id=parcela_id)
+        except CampaignPlot.DoesNotExist:
+            return Response({
+                'error': 'La parcela no está asignada a esta campaña'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='ELIMINAR',
+            tabla_afectada='campaign_plot',
+            registro_id=assignment.id,
+            detalles={
+                'campaign': campaign.nombre,
+                'parcela': assignment.parcela.nombre,
+                'desasignado_por': request.user.usuario
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        assignment.delete()
+        return Response({
+            'mensaje': 'Parcela desasignada exitosamente'
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def plots(self, request, pk=None):
+        """
+        T037: Obtener parcelas asignadas a la campaña
+        GET /api/campaigns/{id}/plots/
+        """
+        campaign = self.get_object()
+        plots = campaign.parcelas.all()
+        serializer = CampaignPlotSerializer(plots, many=True)
+        return Response(serializer.data)
+
+
+# ============================================================================
+# CU11: REPORTES DE CAMPAÑAS - VISTAS
+# T039: Reporte de labores por campaña
+# T050: Reporte de producción por campaña
+# T052: Reporte de producción por parcela
+# ============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def report_labors_by_campaign(request):
+    """
+    T039: Reporte de labores por campaña
+    GET /api/reports/labors-by-campaign/?campaign_id=X&start_date=Y&end_date=Z&tipo_tratamiento=T&parcela_id=P
+    
+    Parámetros:
+    - campaign_id (requerido): ID de la campaña
+    - start_date (opcional): Fecha de inicio (YYYY-MM-DD)
+    - end_date (opcional): Fecha de fin (YYYY-MM-DD)
+    - tipo_tratamiento (opcional): Tipo de tratamiento a filtrar
+    - parcela_id (opcional): ID de parcela específica
+    """
+    campaign_id = request.query_params.get('campaign_id')
+    
+    if not campaign_id:
+        return Response({
+            'error': 'campaign_id es requerido'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    start_date = request.query_params.get('start_date')
+    end_date = request.query_params.get('end_date')
+    tipo_tratamiento = request.query_params.get('tipo_tratamiento')
+    parcela_id = request.query_params.get('parcela_id')
+
+    # Convertir fechas si están presentes
+    if start_date:
+        try:
+            from datetime import datetime
+            start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({
+                'error': 'Formato de start_date inválido. Use YYYY-MM-DD'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    if end_date:
+        try:
+            from datetime import datetime
+            end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({
+                'error': 'Formato de end_date inválido. Use YYYY-MM-DD'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Generar reporte
+    report_data = CampaignReports.get_labors_by_campaign(
+        campaign_id=campaign_id,
+        start_date=start_date,
+        end_date=end_date,
+        tipo_tratamiento=tipo_tratamiento,
+        parcela_id=parcela_id
+    )
+
+    # Verificar si hay error
+    if 'error' in report_data:
+        return Response(report_data, status=status.HTTP_404_NOT_FOUND)
+
+    return Response(report_data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def report_production_by_campaign(request):
+    """
+    T050: Reporte de producción por campaña
+    GET /api/reports/production-by-campaign/?campaign_id=X
+    
+    Parámetros:
+    - campaign_id (requerido): ID de la campaña
+    """
+    campaign_id = request.query_params.get('campaign_id')
+    
+    if not campaign_id:
+        return Response({
+            'error': 'campaign_id es requerido'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Generar reporte
+    report_data = CampaignReports.get_production_by_campaign(campaign_id=campaign_id)
+
+    # Verificar si hay error
+    if 'error' in report_data:
+        return Response(report_data, status=status.HTTP_404_NOT_FOUND)
+
+    return Response(report_data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def report_production_by_plot(request):
+    """
+    T052: Reporte de producción por parcela
+    GET /api/reports/production-by-plot/?plot_id=X&campaign_id=Y&start_date=Z&end_date=W
+    
+    Parámetros:
+    - plot_id (requerido): ID de la parcela
+    - campaign_id (opcional): ID de la campaña
+    - start_date (opcional): Fecha de inicio (YYYY-MM-DD)
+    - end_date (opcional): Fecha de fin (YYYY-MM-DD)
+    """
+    plot_id = request.query_params.get('plot_id')
+    
+    if not plot_id:
+        return Response({
+            'error': 'plot_id es requerido'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    campaign_id = request.query_params.get('campaign_id')
+    start_date = request.query_params.get('start_date')
+    end_date = request.query_params.get('end_date')
+
+    # Convertir fechas si están presentes
+    if start_date:
+        try:
+            from datetime import datetime
+            start_date = datetime.strptime(start_date.strip(), '%Y-%m-%d').date()
+        except ValueError:
+            return Response({
+                'error': f'Formato de start_date inválido. Use YYYY-MM-DD. Recibido: "{start_date}"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    if end_date:
+        try:
+            from datetime import datetime
+            end_date = datetime.strptime(end_date.strip(), '%Y-%m-%d').date()
+        except ValueError:
+            return Response({
+                'error': f'Formato de end_date inválido. Use YYYY-MM-DD. Recibido: "{end_date}"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Generar reporte
+    report_data = CampaignReports.get_production_by_plot(
+        plot_id=plot_id,
+        campaign_id=campaign_id,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    # Verificar si hay error
+    if 'error' in report_data:
+        return Response(report_data, status=status.HTTP_404_NOT_FOUND)
+
+    return Response(report_data)

@@ -1,0 +1,1 @@
+# Tests para CU8 - Gestión de Insumos Agrícolas

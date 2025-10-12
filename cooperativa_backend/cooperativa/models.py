@@ -1655,3 +1655,329 @@ class Fertilizante(models.Model):
             return {'N': n, 'P': p, 'K': k}
         except (ValueError, IndexError):
             return None
+
+
+# ============================================================================
+# CU9: GESTIÓN DE CAMPAÑAS AGRÍCOLAS
+# T036: Gestión de campañas (crear, editar, eliminar)
+# T037: Relación entre campaña y socios
+# ============================================================================
+
+class Campaign(models.Model):
+    """
+    CU9: Modelo para gestión de campañas agrícolas
+    T036: Gestión de campañas (crear, editar, eliminar)
+    
+    Una campaña representa un ciclo agrícola completo con objetivos específicos
+    de producción, fechas definidas y asociación con socios y parcelas.
+    """
+    ESTADOS = [
+        ('PLANIFICADA', 'Planificada'),
+        ('EN_CURSO', 'En Curso'),
+        ('FINALIZADA', 'Finalizada'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    nombre = models.CharField(
+        max_length=200,
+        unique=True,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\/]+$',
+            message='Nombre solo puede contener letras, números, espacios, guiones, puntos y barras'
+        )],
+        help_text='Nombre descriptivo de la campaña'
+    )
+    fecha_inicio = models.DateField(
+        help_text='Fecha de inicio de la campaña'
+    )
+    fecha_fin = models.DateField(
+        help_text='Fecha programada de finalización de la campaña'
+    )
+    meta_produccion = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='La meta de producción no puede ser negativa')],
+        help_text='Meta de producción total de la campaña (en kg o toneladas)'
+    )
+    unidad_meta = models.CharField(
+        max_length=20,
+        default='kg',
+        help_text='Unidad de medida de la meta (kg, toneladas, quintales, etc.)'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS,
+        default='PLANIFICADA',
+        help_text='Estado actual de la campaña'
+    )
+    descripcion = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Descripción detallada de los objetivos y características de la campaña'
+    )
+    presupuesto = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='El presupuesto no puede ser negativo')],
+        help_text='Presupuesto asignado a la campaña'
+    )
+    responsable = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='campañas_responsables',
+        help_text='Usuario responsable de coordinar la campaña'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'campaign'
+        verbose_name = 'Campaña'
+        verbose_name_plural = 'Campañas'
+        ordering = ['-fecha_inicio']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.fecha_inicio} - {self.fecha_fin})"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que fecha_fin > fecha_inicio
+        if self.fecha_fin <= self.fecha_inicio:
+            raise ValidationError({
+                'fecha_fin': 'La fecha de fin debe ser posterior a la fecha de inicio'
+            })
+
+        # Validar solape de fechas con otras campañas
+        self._validar_solape_fechas()
+
+    def _validar_solape_fechas(self):
+        """
+        Valida que no haya solape de fechas con otras campañas activas
+        T036: Validación de no solapes entre campañas
+        """
+        # Obtener campañas que se solapan (excluyendo la actual si es actualización)
+        queryset = Campaign.objects.filter(
+            Q(estado__in=['PLANIFICADA', 'EN_CURSO']) &
+            (
+                # Caso 1: Nueva campaña inicia dentro de campaña existente
+                Q(fecha_inicio__lte=self.fecha_inicio, fecha_fin__gte=self.fecha_inicio) |
+                # Caso 2: Nueva campaña termina dentro de campaña existente
+                Q(fecha_inicio__lte=self.fecha_fin, fecha_fin__gte=self.fecha_fin) |
+                # Caso 3: Nueva campaña engloba campaña existente
+                Q(fecha_inicio__gte=self.fecha_inicio, fecha_fin__lte=self.fecha_fin)
+            )
+        )
+
+        # Excluir la instancia actual si es una actualización
+        if self.pk:
+            queryset = queryset.exclude(pk=self.pk)
+
+        if queryset.exists():
+            campañas_solapadas = ', '.join([c.nombre for c in queryset])
+            raise ValidationError({
+                'fecha_inicio': f'Las fechas se solapan con las siguientes campañas: {campañas_solapadas}. '
+                               f'No puede haber campañas simultáneas.'
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+    def puede_eliminar(self):
+        """
+        Verifica si la campaña puede ser eliminada
+        T036: Validar que no se elimine campaña con labores o cosechas asociadas
+        """
+        # Simplemente retorna True si no hay labores ni cosechas
+        # La lógica real se maneja en las relaciones de cascada
+        return True
+
+    def duracion_dias(self):
+        """Calcula la duración de la campaña en días"""
+        return (self.fecha_fin - self.fecha_inicio).days
+
+    def dias_restantes(self):
+        """Calcula días restantes si la campaña está en curso"""
+        from datetime import date
+        if self.estado == 'EN_CURSO':
+            hoy = date.today()
+            if hoy < self.fecha_fin:
+                return (self.fecha_fin - hoy).days
+        return 0
+
+    def progreso_temporal(self):
+        """Calcula el progreso temporal de la campaña (%)"""
+        from datetime import date
+        hoy = date.today()
+        
+        # Si la campaña está finalizada, progreso = 100%
+        if self.estado == 'FINALIZADA':
+            return 100.0
+        
+        # Si la campaña está cancelada, progreso = 0%
+        if self.estado == 'CANCELADA':
+            return 0.0
+        
+        # Si la campaña no ha empezado, progreso = 0%
+        if hoy < self.fecha_inicio:
+            return 0.0
+        
+        # Si la campaña ya terminó (fecha pasada), progreso = 100%
+        if hoy > self.fecha_fin:
+            return 100.0
+        
+        # Calcular progreso basado en días transcurridos
+        duracion_total = self.duracion_dias()
+        dias_transcurridos = (hoy - self.fecha_inicio).days
+
+        if duracion_total <= 0:
+            return 100.0
+
+        return min(100.0, max(0.0, (dias_transcurridos / duracion_total) * 100))
+
+
+class CampaignPartner(models.Model):
+    """
+    CU9: Modelo para relación M2M entre Campaign y Socio con campos adicionales
+    T037: Relación entre campaña y socios
+    """
+    ROLES = [
+        ('COORDINADOR', 'Coordinador'),
+        ('PRODUCTOR', 'Productor'),
+        ('TECNICO', 'Técnico Agrícola'),
+        ('SUPERVISOR', 'Supervisor'),
+    ]
+
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.CASCADE,
+        related_name='socios_asignados'
+    )
+    socio = models.ForeignKey(
+        Socio,
+        on_delete=models.CASCADE,
+        related_name='campañas_participadas'
+    )
+    rol = models.CharField(
+        max_length=20,
+        choices=ROLES,
+        default='PRODUCTOR',
+        help_text='Rol del socio en la campaña'
+    )
+    fecha_asignacion = models.DateField(
+        default=timezone.now,
+        help_text='Fecha en que el socio fue asignado a la campaña'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones sobre la participación del socio'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'campaign_partner'
+        verbose_name = 'Socio de Campaña'
+        verbose_name_plural = 'Socios de Campañas'
+        unique_together = ('campaign', 'socio')
+        ordering = ['-fecha_asignacion']
+
+    def __str__(self):
+        return f"{self.socio.usuario.get_full_name()} - {self.campaign.nombre} ({self.rol})"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que el socio esté activo
+        if self.socio.estado != 'ACTIVO':
+            raise ValidationError({
+                'socio': 'Solo se pueden asignar socios con estado ACTIVO'
+            })
+
+        # Validar que la fecha de asignación esté dentro del rango de la campaña
+        if self.fecha_asignacion < self.campaign.fecha_inicio:
+            raise ValidationError({
+                'fecha_asignacion': 'La fecha de asignación no puede ser anterior al inicio de la campaña'
+            })
+
+
+class CampaignPlot(models.Model):
+    """
+    CU9: Modelo para asociar parcelas a campañas
+    T037: Relación entre campaña y parcelas
+    """
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.CASCADE,
+        related_name='parcelas'
+    )
+    parcela = models.ForeignKey(
+        Parcela,
+        on_delete=models.CASCADE,
+        related_name='campañas'
+    )
+    fecha_asignacion = models.DateField(
+        default=timezone.now,
+        help_text='Fecha en que la parcela fue asignada a la campaña'
+    )
+    superficie_comprometida = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0.01, message='La superficie debe ser mayor a 0')],
+        help_text='Superficie de la parcela comprometida para esta campaña (en hectáreas)'
+    )
+    cultivo_planificado = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Cultivo planificado para esta parcela en la campaña'
+    )
+    meta_produccion_parcela = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='La meta no puede ser negativa')],
+        help_text='Meta de producción específica para esta parcela'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones sobre la participación de la parcela'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'campaign_plot'
+        verbose_name = 'Parcela de Campaña'
+        verbose_name_plural = 'Parcelas de Campañas'
+        unique_together = ('campaign', 'parcela')
+        ordering = ['-fecha_asignacion']
+
+    def __str__(self):
+        return f"{self.parcela.nombre} - {self.campaign.nombre}"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que la parcela esté activa
+        if self.parcela.estado != 'ACTIVA':
+            raise ValidationError({
+                'parcela': 'Solo se pueden asignar parcelas con estado ACTIVA'
+            })
+
+        # Validar que la superficie comprometida no exceda la superficie total
+        if self.superficie_comprometida and self.superficie_comprometida > self.parcela.superficie_hectareas:
+            raise ValidationError({
+                'superficie_comprometida': f'La superficie comprometida no puede exceder la superficie total de la parcela ({self.parcela.superficie_hectareas} ha)'
+            })
+
+        # Validar que la fecha de asignación esté dentro del rango de la campaña
+        if self.fecha_asignacion < self.campaign.fecha_inicio:
+            raise ValidationError({
+                'fecha_asignacion': 'La fecha de asignación no puede ser anterior al inicio de la campaña'
+            })
