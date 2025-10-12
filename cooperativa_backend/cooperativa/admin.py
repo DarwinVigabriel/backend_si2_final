@@ -1,7 +1,12 @@
 from django.contrib import admin
 from django import forms
 from django.utils import timezone
-from .models import Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, Fertilizante
+from django.utils.html import format_html
+from .models import (
+    Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, 
+    BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, 
+    Fertilizante, Labor, ProductoCosechado 
+)
 
 # Register your models here.
 
@@ -778,6 +783,322 @@ class FertilizanteAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).order_by('-creado_en')
 
+
+@admin.register(Labor)
+class LaborAdmin(admin.ModelAdmin):
+    """
+    CU10: Administración de labores agrícolas en Django Admin
+    T047: Gestión de labores (registrar, editar, eliminar)
+    T048: Descuento de insumos del inventario
+    T049: Validación de fechas dentro de campaña
+    """
+    list_display = (
+        'id', 'fecha_labor', 'labor', 'estado', 'campaña', 'parcela',
+        'insumo', 'cantidad_insumo', 'costo_total', 'responsable', 'creado_en'
+    )
+    list_filter = (
+        'labor', 'estado', 'campaña', 'parcela__socio', 
+        'fecha_labor', 'creado_en'
+    )
+    search_fields = (
+        'descripcion', 'observaciones', 'parcela__nombre',
+        'campaña__nombre', 'responsable__usuario'
+    )
+    readonly_fields = (
+        'creado_en', 'actualizado_en', 'costo_total',
+        'duracion_display', 'tipo_labor_display', 'puede_descontar_insumo'
+    )
+    list_editable = ('estado',)
+    date_hierarchy = 'fecha_labor'
+    raw_id_fields = ('campaña', 'parcela', 'insumo', 'responsable')
+
+    fieldsets = (
+        ('Información Básica', {
+            'fields': ('fecha_labor', 'labor', 'estado', 'responsable')
+        }),
+        ('Ubicación', {
+            'fields': ('campaña', 'parcela')
+        }),
+        ('Insumos y Costos', {
+            'fields': ('insumo', 'cantidad_insumo', 'costo_estimado')
+        }),
+        ('Detalles de la Labor', {
+            'fields': ('descripcion', 'observaciones', 'duracion_horas')
+        }),
+        ('Campos Calculados', {
+            'fields': ('costo_total', 'duracion_display', 'tipo_labor_display', 'puede_descontar_insumo'),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': ('creado_en', 'actualizado_en'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    actions = [
+        'marcar_como_planificada',
+        'marcar_como_en_proceso',
+        'marcar_como_completada',
+        'marcar_como_cancelada',
+        'exportar_labores_csv'
+    ]
+
+    def costo_total(self, obj):
+        return f"{obj.costo_total():.2f} Bs" if obj.costo_total() else "N/A"
+    costo_total.short_description = 'Costo Total'
+
+    def duracion_display(self, obj):
+        return obj.duracion_display()
+    duracion_display.short_description = 'Duración'
+
+    def tipo_labor_display(self, obj):
+        return obj.get_tipo_labor_display()
+    tipo_labor_display.short_description = 'Tipo de Labor'
+
+    def puede_descontar_insumo(self, obj):
+        return "Sí" if obj.puede_descontar_insumo() else "No"
+    puede_descontar_insumo.short_description = 'Descuenta Insumo'
+
+    def marcar_como_planificada(self, request, queryset):
+        updated = queryset.update(estado='PLANIFICADA')
+        self.message_user(
+            request,
+            f'{updated} labor(es) marcada(s) como planificada(s).'
+        )
+    marcar_como_planificada.short_description = "Marcar como Planificada"
+
+    def marcar_como_en_proceso(self, request, queryset):
+        updated = queryset.update(estado='EN_PROCESO')
+        self.message_user(
+            request,
+            f'{updated} labor(es) marcada(s) como en proceso.'
+        )
+    marcar_como_en_proceso.short_description = "Marcar como En Proceso"
+
+    def marcar_como_completada(self, request, queryset):
+        # Si se completan labores con insumos, descontar del inventario
+        for labor in queryset:
+            if labor.estado != 'COMPLETADA' and labor.insumo and labor.cantidad_insumo:
+                labor._descontar_insumo()
+        
+        updated = queryset.update(estado='COMPLETADA')
+        self.message_user(
+            request,
+            f'{updated} labor(es) marcada(s) como completada(s).'
+        )
+    marcar_como_completada.short_description = "Marcar como Completada"
+
+    def marcar_como_cancelada(self, request, queryset):
+        # Si se cancelan labores completadas con insumos, revertir el descuento
+        for labor in queryset:
+            if labor.estado == 'COMPLETADA' and labor.insumo and labor.cantidad_insumo:
+                labor.insumo.cantidad_disponible += labor.cantidad_insumo
+                labor.insumo.save()
+        
+        updated = queryset.update(estado='CANCELADA')
+        self.message_user(
+            request,
+            f'{updated} labor(es) marcada(s) como cancelada(s).'
+        )
+    marcar_como_cancelada.short_description = "Marcar como Cancelada"
+
+    def exportar_labores_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="labores_agricolas_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Fecha Labor', 'Tipo Labor', 'Estado', 'Campaña',
+            'Parcela', 'Insumo', 'Cantidad Insumo', 'Costo Estimado',
+            'Costo Total', 'Duración', 'Responsable', 'Descripción'
+        ])
+
+        for labor in queryset:
+            writer.writerow([
+                labor.id,
+                labor.fecha_labor,
+                labor.get_tipo_labor_display(),
+                labor.estado,
+                labor.campaña.nombre if labor.campaña else '',
+                labor.parcela.nombre if labor.parcela else '',
+                str(labor.insumo) if labor.insumo else '',
+                labor.cantidad_insumo or '',
+                labor.costo_estimado or '',
+                labor.costo_total(),
+                labor.duracion_display(),
+                labor.responsable.get_full_name() if labor.responsable else '',
+                labor.descripcion or ''
+            ])
+
+        self.message_user(request, f'Exportadas {queryset.count()} labores a CSV.')
+        return response
+
+    exportar_labores_csv.short_description = "Exportar labores a CSV"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            'campaña', 'parcela__socio__usuario', 'insumo', 'responsable'
+        ).order_by('-fecha_labor', '-creado_en')
+
+
+@admin.register(ProductoCosechado)
+class ProductoCosechadoAdmin(admin.ModelAdmin):
+    """
+    CU15: Configuración del admin para Productos Cosechados
+    """
+    list_display = [
+        'id', 'cultivo_especie_display', 'cantidad_display', 'fecha_cosecha', 
+        'estado_badge', 'origen_display', 'lote', 'ubicacion_almacen', 'creado_en'
+    ]
+    
+    list_filter = [
+        'estado', 'fecha_cosecha', 'cultivo__especie', 'calidad',
+        'campania', 'parcela'
+    ]
+    
+    search_fields = [
+        'cultivo__especie', 'cultivo__variedad', 'lote', 
+        'ubicacion_almacen', 'calidad'
+    ]
+    
+    readonly_fields = [
+        'creado_en', 'actualizado_en', 'origen_display', 
+        'dias_en_almacen_display', 'puede_vender_display'
+    ]
+    
+    fieldsets = (
+        ('Información Principal', {
+            'fields': (
+                'fecha_cosecha', 'cantidad', 'unidad_medida', 'calidad',
+                'estado', 'lote', 'ubicacion_almacen'
+            )
+        }),
+        ('Relaciones', {
+            'fields': (
+                'cultivo', 'labor', 'campania', 'parcela'
+            )
+        }),
+        ('Información Adicional', {
+            'fields': (
+                'observaciones',
+            )
+        }),
+        ('Auditoría', {
+            'fields': (
+                'origen_display', 'dias_en_almacen_display', 
+                'puede_vender_display', 'creado_en', 'actualizado_en'
+            ),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    raw_id_fields = ['cultivo', 'labor', 'campania', 'parcela']
+    
+    date_hierarchy = 'fecha_cosecha'
+    
+    list_per_page = 25
+    
+    actions = ['marcar_como_vendido', 'marcar_como_procesado', 'marcar_como_vencido']
+    
+    def cultivo_especie_display(self, obj):
+        """Muestra la especie y variedad del cultivo"""
+        if obj.cultivo.variedad:
+            return f"{obj.cultivo.especie} - {obj.cultivo.variedad}"
+        return obj.cultivo.especie
+    cultivo_especie_display.short_description = 'Cultivo'
+    
+    def cantidad_display(self, obj):
+        """Muestra la cantidad formateada"""
+        return f"{obj.cantidad} {obj.unidad_medida}"
+    cantidad_display.short_description = 'Cantidad'
+    
+    def estado_badge(self, obj):
+        """Muestra el estado con colores"""
+        colors = {
+            'En Almacén': 'blue',
+            'Vendido': 'green', 
+            'Procesado': 'orange',
+            'Vencido': 'red',
+            'En revision': 'gray'
+        }
+        color = colors.get(obj.estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            obj.estado
+        )
+    estado_badge.short_description = 'Estado'
+    estado_badge.admin_order_field = 'estado'
+    
+    def origen_display(self, obj):
+        """Muestra el origen (campaña o parcela)"""
+        return obj.origen_display
+    origen_display.short_description = 'Origen'
+    
+    def dias_en_almacen_display(self, obj):
+        """Muestra días en almacén"""
+        dias = obj.dias_en_almacen()
+        if dias > 30:
+            color = 'red'
+        elif dias > 15:
+            color = 'orange'
+        else:
+            color = 'green'
+        
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{} días</span>',
+            color,
+            dias
+        )
+    dias_en_almacen_display.short_description = 'Días en Almacén'
+    
+    def puede_vender_display(self, obj):
+        """Indica si el producto puede ser vendido"""
+        if obj.puede_vender():
+            return format_html(
+                '<span style="color: green; font-weight: bold;">✓ SÍ</span>'
+            )
+        return format_html(
+            '<span style="color: red; font-weight: bold;">✗ NO</span>'
+        )
+    puede_vender_display.short_description = 'Puede Vender'
+    
+    def marcar_como_vendido(self, request, queryset):
+        """Acción para marcar productos como vendidos"""
+        updated = queryset.update(estado='Vendido')
+        self.message_user(
+            request, 
+            f'{updated} productos marcados como vendidos.'
+        )
+    marcar_como_vendido.short_description = "Marcar seleccionados como VENDIDO"
+    
+    def marcar_como_procesado(self, request, queryset):
+        """Acción para marcar productos como procesados"""
+        updated = queryset.update(estado='Procesado')
+        self.message_user(
+            request, 
+            f'{updated} productos marcados como procesados.'
+        )
+    marcar_como_procesado.short_description = "Marcar seleccionados como PROCESADO"
+    
+    def marcar_como_vencido(self, request, queryset):
+        """Acción para marcar productos como vencidos"""
+        updated = queryset.update(estado='Vencido')
+        self.message_user(
+            request, 
+            f'{updated} productos marcados como vencidos.'
+        )
+    marcar_como_vencido.short_description = "Marcar seleccionados como VENCIDO"
+    
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'cultivo', 'labor', 'campania', 'parcela__socio__usuario'
+        )
 
 # =============================================================================
 # IMPORTAR ADMINISTRACIÓN DE CAMPAÑAS (CU9 - SPRINT 2)
