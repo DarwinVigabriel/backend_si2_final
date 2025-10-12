@@ -27,8 +27,15 @@ router.register(r'semillas', views.SemillaViewSet)
 # CU8: ViewSets para gestión de insumos agrícolas
 router.register(r'pesticidas', views.PesticidaViewSet)
 router.register(r'fertilizantes', views.FertilizanteViewSet)
+
 # CU9: ViewSet para gestión de campañas agrícolas
 router.register(r'campaigns', views.CampaignViewSet)
+
+# CU10: ViewSet para gestión de labores agrícolas
+router.register(r'labores', views.LaborViewSet)
+
+# CU15: ViewSet para gestión de productos cosechados
+router.register(r'productos-cosechados', views.ProductoCosechadoViewSet)
 
 # URLs de la aplicación
 urlpatterns = [
@@ -75,15 +82,19 @@ urlpatterns = [
     path('api/roles/crear-personalizado/', views.crear_rol_personalizado, name='crear-rol-personalizado'),
     path('api/roles/buscar-avanzado/', views.buscar_roles_avanzado, name='buscar-roles-avanzado'),
 
-    # CU7: Endpoints específicos para gestión de semillas
-    # path('api/semillas/buscar-avanzado/', views.buscar_semillas_avanzado, name='buscar-semillas-avanzado'),
-    # path('api/validar/semilla/', views.validar_semilla, name='validar-semilla'),
-    # path('api/reportes/estadisticas-semillas/', views.estadisticas_semillas, name='estadisticas-semillas'),
+    # CU10: Endpoints específicos para gestión de labores agrícolas
+    path('api/labores/crear-rapida/', views.crear_labor_rapida, name='crear-labor-rapida'),
+    path('api/labores/buscar-avanzado/', views.buscar_labores_avanzado, name='buscar-labores-avanzado'),
 
     # CU11: Endpoints de reportes de campañas
     path('api/reports/labors-by-campaign/', views.report_labors_by_campaign, name='report-labors-by-campaign'),
     path('api/reports/production-by-campaign/', views.report_production_by_campaign, name='report-production-by-campaign'),
     path('api/reports/production-by-plot/', views.report_production_by_plot, name='report-production-by-plot'),
+
+    # CU15: Endpoints específicos para gestión de productos cosechados
+    path('api/productos-cosechados/crear-rapido/', views.crear_producto_cosechado_rapido, name='crear-producto-cosechado-rapido'),
+    path('api/productos-cosechados/buscar-avanzado/', views.buscar_productos_cosechados_avanzado, name='buscar-productos-cosechados-avanzado'),
+    path('api/productos-cosechados/reporte-por-periodo/', views.reporte_productos_cosechados_por_periodo, name='reporte-productos-cosechados-por-periodo'),
 
     # Nueva ruta para el endpoint de sesión de depuración
     path('api/auth/debug-session/', views.debug_session_status, name='debug-session'),
