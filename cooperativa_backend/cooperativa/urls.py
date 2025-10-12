@@ -32,6 +32,8 @@ router.register(r'campaigns', views.CampaignViewSet)
 
 # URLs de la aplicación
 urlpatterns = [
+    # Landing page bonita (no afecta APIs existentes)
+    path('', views.home, name='home'),
     # Endpoints específicos deben ir ANTES del router para evitar conflictos
     # Vistas de autenticación API - CU2: Cerrar sesión
     path('api/auth/login/', views.login_view, name='login'),

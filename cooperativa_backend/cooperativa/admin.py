@@ -5,6 +5,11 @@ from .models import Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, BitacoraAu
 
 # Register your models here.
 
+# Branding del panel administrativo (no afecta otros CU)
+admin.site.site_header = "🌱 Cooperativa Agrícola – Panel Administrativo"
+admin.site.site_title = "Cooperativa Admin"
+admin.site.index_title = "Inicio del Panel"
+
 @admin.register(Rol)
 class RolAdmin(admin.ModelAdmin):
     list_display = ('id', 'nombre', 'descripcion', 'es_sistema', 'creado_en')
