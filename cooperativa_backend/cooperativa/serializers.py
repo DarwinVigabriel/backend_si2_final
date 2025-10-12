@@ -6,7 +6,8 @@ from .models import (
     Rol, Usuario, UsuarioRol, Comunidad, Socio,
     Parcela, Cultivo, BitacoraAuditoria,
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
-    Semilla, Pesticida, Fertilizante
+    Semilla, Pesticida, Fertilizante,
+    Campaign, CampaignPartner, CampaignPlot
 )
 
 

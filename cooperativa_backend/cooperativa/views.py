@@ -20,6 +20,7 @@ from .models import (
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
     Semilla, Pesticida, Fertilizante
 )
+from .models import Campaign, CampaignPartner, CampaignPlot
 from .serializers import (
     RolSerializer, UsuarioSerializer, UsuarioCreateSerializer,
     UsuarioRolSerializer, ComunidadSerializer, SocioSerializer,
