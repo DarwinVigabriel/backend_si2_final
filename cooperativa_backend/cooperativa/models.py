@@ -1799,12 +1799,14 @@ class Campaign(models.Model):
 
     def duracion_dias(self):
         """Calcula la duración de la campaña en días"""
+        if not self.fecha_inicio or not self.fecha_fin:
+            return 0
         return (self.fecha_fin - self.fecha_inicio).days
 
     def dias_restantes(self):
         """Calcula días restantes si la campaña está en curso"""
         from datetime import date
-        if self.estado == 'EN_CURSO':
+        if self.estado == 'EN_CURSO' and self.fecha_fin:
             hoy = date.today()
             if hoy < self.fecha_fin:
                 return (self.fecha_fin - hoy).days
@@ -1814,6 +1816,9 @@ class Campaign(models.Model):
         """Calcula el progreso temporal de la campaña (%)"""
         from datetime import date
         hoy = date.today()
+        # Si faltan fechas, no es posible calcular
+        if not self.fecha_inicio or not self.fecha_fin:
+            return 0.0
         
         # Si la campaña está finalizada, progreso = 100%
         if self.estado == 'FINALIZADA':

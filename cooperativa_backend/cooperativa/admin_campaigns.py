@@ -8,8 +8,10 @@ Fecha: Octubre 2025
 from django.contrib import admin
 from django.utils.html import format_html
 from django.db.models import Count, Sum, Q
-from django.urls import reverse
+from django.urls import reverse, path
+from django.http import HttpResponse
 from .models import Campaign, CampaignPartner, CampaignPlot
+from .reports import CampaignReports
 
 
 class CampaignPartnerInline(admin.TabularInline):
@@ -69,11 +71,14 @@ class CampaignAdmin(admin.ModelAdmin):
         'creado_en', 'actualizado_en', 'duracion_dias',
         'progreso_temporal_display', 'dias_restantes', 'total_socios',
         'total_parcelas', 'total_superficie_comprometida',
-        'estado_visual'
+        'estado_visual', 'reportes_cu11_links'
     )
     
     date_hierarchy = 'fecha_inicio'
     list_per_page = 25
+    save_on_top = True
+    list_select_related = ('responsable',)
+    autocomplete_fields = ('responsable',)
     
     inlines = [CampaignPartnerInline, CampaignPlotInline]
     
@@ -100,6 +105,9 @@ class CampaignAdmin(admin.ModelAdmin):
             ),
             'classes': ('collapse',)
         }),
+        ('📈 Reportes CU11', {
+            'fields': ('reportes_cu11_links',),
+        }),
         ('🕐 Auditoría', {
             'fields': ('creado_en', 'actualizado_en'),
             'classes': ('collapse',)
@@ -111,7 +119,9 @@ class CampaignAdmin(admin.ModelAdmin):
         'marcar_finalizada',
         'marcar_cancelada',
         'clonar_campana',
-        'exportar_reporte_csv'
+        'exportar_reporte_csv',
+        'exportar_reporte_produccion_csv',
+        'exportar_reporte_labores_csv'
     ]
     
     # Métodos para list_display
@@ -246,6 +256,154 @@ class CampaignAdmin(admin.ModelAdmin):
             obj.parcelas.count()
         )
     estado_visual.short_description = 'Resumen Visual'
+
+    # ---------------------------
+    # Reportes CU11 en el Admin
+    # ---------------------------
+
+    def reportes_cu11_links(self, obj):
+        """Muestra accesos rápidos a reportes CU11 dentro del admin."""
+        if not obj.pk:
+            return '-'
+        url_lab = reverse('admin:cooperativa_campaign_report_labors', args=[obj.pk])
+        url_prod = reverse('admin:cooperativa_campaign_report_production', args=[obj.pk])
+        return format_html(
+            '<div style="margin-bottom:8px;color:#555;">'
+            'Abre los reportes en una nueva pestaña. Si acabas de crear la campaña, guarda primero.'
+            '</div>'
+            '<div style="display:flex; gap:8px; flex-wrap:wrap;">'
+            '<a class="button" target="_blank" href="{}">Reporte de Labores</a>'
+            '<a class="button" target="_blank" href="{}">Reporte de Producción</a>'
+            '</div>',
+            url_lab, url_prod
+        )
+    reportes_cu11_links.short_description = 'Accesos a Reportes CU11'
+
+    def get_urls(self):
+        """Agrega rutas personalizadas para reportes CU11 bajo el namespace del admin."""
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                'report/labors/<int:campaign_id>/',
+                self.admin_site.admin_view(self.report_labors_view),
+                name='cooperativa_campaign_report_labors'
+            ),
+            path(
+                'report/production/<int:campaign_id>/',
+                self.admin_site.admin_view(self.report_production_view),
+                name='cooperativa_campaign_report_production'
+            ),
+        ]
+        return custom_urls + urls
+
+    def _html_table(self, headers, rows):
+        """Helper para construir una tabla HTML simple y compatible con el admin."""
+        thead = ''.join([f'<th style="text-align:left; padding:6px 10px;">{h}</th>' for h in headers])
+        trs = []
+        for r in rows:
+            tds = ''.join([f'<td style="padding:6px 10px;">{(v if v is not None else "-")}</td>' for v in r])
+            trs.append(f'<tr>{tds}</tr>')
+        tbody = ''.join(trs)
+        return f'<table class="adminlist" style="border-collapse:collapse; width:100%;">' \
+               f'<thead style="background:#f8f9fa;">{thead}</thead><tbody>{tbody}</tbody></table>'
+
+    def report_labors_view(self, request, campaign_id):
+        """Vista HTML sencilla con el reporte de labores (CU11/T039)."""
+        data = CampaignReports.get_labors_by_campaign(campaign_id)
+        if 'error' in data:
+            return HttpResponse(f"<h2>Error</h2><p>{data['error']}</p>")
+
+        camp = data['campaign']
+        est = data['estadisticas']
+
+        # Tabla de labores por tipo
+        headers = ['Tipo de Tratamiento', 'Cantidad', 'Costo Total', 'Dosis Promedio']
+        rows = [
+            (
+                item.get('tipo_tratamiento', '-'),
+                item.get('count', 0),
+                f"{float(item.get('costo_total') or 0):.2f}",
+                f"{float(item.get('dosis_promedio') or 0):.2f}"
+            )
+            for item in data.get('labors_by_type', [])
+        ]
+        table_labors = self._html_table(headers, rows)
+
+        html = f"""
+        <div class="container">
+          <h2>Reporte de Labores - {camp['nombre']}</h2>
+          <p><strong>Periodo:</strong> {camp['fecha_inicio']} a {camp['fecha_fin']} | <strong>Estado:</strong> {camp['estado']}</p>
+          <div style="display:flex; gap:20px; flex-wrap:wrap; margin:12px 0;">
+            <div><strong>Total de labores:</strong> {est['total_labors']}</div>
+            <div><strong>Área trabajada (ha):</strong> {est['total_area_worked']:.2f}</div>
+            <div><strong>Costo total (Bs):</strong> {est['costo_total_labores']:.2f}</div>
+            <div><strong>Parcelas trabajadas:</strong> {est['parcelas_trabajadas']}</div>
+          </div>
+          <h3>Labores por tipo</h3>
+          {table_labors}
+        </div>
+        """
+        return HttpResponse(html)
+
+    def report_production_view(self, request, campaign_id):
+        """Vista HTML sencilla con el reporte de producción (CU11/T050)."""
+        data = CampaignReports.get_production_by_campaign(campaign_id)
+        if 'error' in data:
+            return HttpResponse(f"<h2>Error</h2><p>{data['error']}</p>")
+
+        camp = data['campaign']
+        est = data['estadisticas']
+        comp = data['comparativa_meta']
+
+        # Producción por producto
+        headers_prod = ['Producto', 'Unidad', 'Cantidad Total', 'Nro Cosechas', 'Precio Promedio', 'Valor Total']
+        rows_prod = [
+            (
+                item.get('cultivo_especie', '-'),
+                item.get('unidad_medida', '-') if isinstance(item, dict) else '-',
+                f"{float(item.get('cantidad_total') or 0):.2f}",
+                item.get('numero_cosechas', 0),
+                f"{float(item.get('precio_promedio') or 0):.2f}",
+                f"{float(item.get('valor_total') or 0):.2f}"
+            ) for item in data.get('production_by_product', [])
+        ]
+        table_prod = self._html_table(headers_prod, rows_prod)
+
+        # Producción por parcela
+        headers_plot = ['Parcela', 'Socio', 'Cantidad Total', 'Nro Cosechas', 'Valor Total (Bs)']
+        rows_plot = [
+            (
+                item.get('parcela_nombre', '-'),
+                f"{item.get('socio_nombre', '')} {item.get('socio_apellido', '')}",
+                f"{float(item.get('cantidad_total') or 0):.2f}",
+                item.get('numero_cosechas', 0),
+                f"{float(item.get('valor_total') or 0):.2f}"
+            ) for item in data.get('production_by_plot', [])
+        ]
+        table_plot = self._html_table(headers_plot, rows_plot)
+
+        html = f"""
+        <div class="container">
+          <h2>Reporte de Producción - {camp['nombre']}</h2>
+          <p><strong>Periodo:</strong> {camp['fecha_inicio']} a {camp['fecha_fin']} | <strong>Estado:</strong> {camp['estado']}</p>
+          <div style=\"display:flex; gap:20px; flex-wrap:wrap; margin:12px 0;\">
+            <div><strong>Producción Total:</strong> {est['total_production']:.2f} {camp['unidad_meta']}</div>
+            <div><strong>Rendimiento (por ha):</strong> {est['avg_yield_per_hectare']:.2f}</div>
+            <div><strong>Superficie (ha):</strong> {est['superficie_total']:.2f}</div>
+            <div><strong>Cosechas:</strong> {est['numero_total_cosechas']}</div>
+            <div><strong>Valor Económico (Bs):</strong> {est['valor_economico_total']:.2f}</div>
+          </div>
+          <div style="margin:8px 0 16px;">
+            <strong>Meta:</strong> {comp['meta_produccion']:.2f} | <strong>Real:</strong> {comp['produccion_real']:.2f} | 
+            <strong>Cumplimiento:</strong> {comp['porcentaje_cumplimiento']:.2f}%
+          </div>
+          <h3>Producción por producto</h3>
+          {table_prod}
+          <h3 style="margin-top:16px;">Producción por parcela</h3>
+          {table_plot}
+        </div>
+        """
+        return HttpResponse(html)
     
     # Acciones en lote
     
@@ -304,7 +462,6 @@ class CampaignAdmin(admin.ModelAdmin):
     def exportar_reporte_csv(self, request, queryset):
         """Exportar campañas a CSV"""
         import csv
-        from django.http import HttpResponse
         from datetime import datetime
         
         response = HttpResponse(content_type='text/csv; charset=utf-8')
@@ -360,6 +517,75 @@ class CampaignAdmin(admin.ModelAdmin):
             'socios_asignados',
             'parcelas'
         )
+
+    # Acciones específicas CU11 (exports rápidos)
+
+    def exportar_reporte_produccion_csv(self, request, queryset):
+        """Exporta un resumen de producción (CU11/T050) para las campañas seleccionadas."""
+        import csv
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="reporte_produccion_cu11_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+        response.write('\ufeff')
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'Campaña', 'Meta', 'Producción Real', 'Cumplimiento (%)',
+            'Rendimiento (por ha)', 'Superficie (ha)', 'Cosechas', 'Valor Económico (Bs)'
+        ])
+
+        for camp in queryset:
+            data = CampaignReports.get_production_by_campaign(camp.id)
+            if 'error' in data:
+                continue
+            est = data['estadisticas']
+            comp = data['comparativa_meta']
+            writer.writerow([
+                camp.nombre,
+                f"{comp['meta_produccion']:.2f}",
+                f"{comp['produccion_real']:.2f}",
+                f"{comp['porcentaje_cumplimiento']:.2f}",
+                f"{est['avg_yield_per_hectare']:.2f}",
+                f"{est['superficie_total']:.2f}",
+                est['numero_total_cosechas'],
+                f"{est['valor_economico_total']:.2f}"
+            ])
+
+        self.message_user(request, f'Resumen de producción exportado para {queryset.count()} campaña(s).')
+        return response
+    exportar_reporte_produccion_csv.short_description = '📈 Exportar Producción (CU11)'
+
+    def exportar_reporte_labores_csv(self, request, queryset):
+        """Exporta un resumen de labores (CU11/T039) para las campañas seleccionadas."""
+        import csv
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="reporte_labores_cu11_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+        response.write('\ufeff')
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'Campaña', 'Total Labores', 'Área Trabajada (ha)', 'Costo Total (Bs)', 'Parcelas Trabajadas'
+        ])
+
+        for camp in queryset:
+            data = CampaignReports.get_labors_by_campaign(camp.id)
+            if 'error' in data:
+                continue
+            est = data['estadisticas']
+            writer.writerow([
+                camp.nombre,
+                est['total_labors'],
+                f"{float(est['total_area_worked']):.2f}",
+                f"{float(est['costo_total_labores']):.2f}",
+                est['parcelas_trabajadas']
+            ])
+
+        self.message_user(request, f'Resumen de labores exportado para {queryset.count()} campaña(s).')
+        return response
+    exportar_reporte_labores_csv.short_description = '🧪 Exportar Labores (CU11)'
 
 
 @admin.register(CampaignPartner)

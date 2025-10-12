@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
 from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -27,8 +28,10 @@ from .serializers import (
     SocioCreateSerializer, SocioCreateSimpleSerializer, SocioUpdateSerializer, ParcelaSerializer, CultivoSerializer,
     BitacoraAuditoriaSerializer, CicloCultivoSerializer,
     CosechaSerializer, TratamientoSerializer, AnalisisSueloSerializer,
-    TransferenciaParcelaSerializer, SemillaSerializer, PesticidaSerializer, FertilizanteSerializer
+    TransferenciaParcelaSerializer, SemillaSerializer, PesticidaSerializer, FertilizanteSerializer,
+    CampaignSerializer, CampaignListSerializer
 )
+from .reports import CampaignReports
 
 
 # Función auxiliar para obtener IP del cliente
@@ -39,6 +42,29 @@ def get_client_ip(request):
     else:
         ip = request.META.get('REMOTE_ADDR')
     return ip
+
+
+# Página de inicio simple y bonita en '/'
+def home(request):
+    html = (
+        "<div style='font-family:Inter,Segoe UI,Arial,sans-serif; padding:32px'>"
+        "<h1 style='margin:0 0 6px;color:#1b4332'>Cooperativa Agrícola</h1>"
+        "<p style='margin:0 0 24px;color:#555'>Backend – Panel y API</p>"
+        "<div style='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px'>"
+        "<a href='/admin/' style='background:#2d6a4f;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none'>Ir al Admin</a>"
+        "<a href='/api/' style='background:#1d3557;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none'>Explorar API</a>"
+        "<a href='/chatbot/' style='background:#6a4c93;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none'>Chatbot</a>"
+        "</div>"
+        "<div style='background:#f8f9fa;border:1px solid #e9ecef;padding:16px;border-radius:8px'>"
+        "<strong>Atajos rápidos (CU9/CU11): YV</strong>"
+        "<ul style='margin:8px 0 0 16px;color:#333'>"
+        "<li><a href='/admin/cooperativa/campaign/' style='color:#2a9d8f'>Campañas</a> (CU9)</li>"
+        "<li>Reportes en detalle de campaña → sección 'Reportes CU11'</li>"
+        "</ul>"
+        "</div>"
+        "</div>"
+    )
+    return HttpResponse(html)
 
 
 # Vistas de Autenticación
