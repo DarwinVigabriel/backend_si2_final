@@ -1,0 +1,26 @@
+# Dependencias MÍNIMAS para el Sistema Cooperativa Agrícola
+
+# Django Framework
+Django==5.0.1
+
+# Django REST Framework para APIs
+djangorestframework==3.14.0
+
+# CORS para comunicación con React frontend
+django-cors-headers==4.3.1
+
+# Base de datos PostgreSQL
+psycopg2-binary==2.9.10
+dj-database-url==2.1.0
+
+# Variables de entorno (.env)
+python-dotenv==1.0.0
+
+# Cliente HTTP para OpenRouter API
+requests==2.31.0
+
+# OpenAI para chatbot con IA
+openai==2.3.0
+
+# Servidor web para producción
+gunicorn==23.0.0

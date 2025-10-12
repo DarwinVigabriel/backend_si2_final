@@ -1,10 +1,46 @@
-asgiref==3.7.2
+# Django Framework
 Django==5.0.1
-djangorestframework==3.14.0
-django-cors-headers==4.3.1
-psycopg2-binary==2.9.10
+asgiref==3.7.2
 sqlparse==0.4.4
-pytz==2023.3
-requests==2.31.0
-python-dotenv==1.0.0
+tzdata==2025.2
+
+# Django REST Framework
+djangorestframework==3.14.0
+
+# CORS para comunicación con frontend
+django-cors-headers==4.3.1
+
+# Base de datos PostgreSQL
+psycopg2-binary==2.9.10
 dj-database-url==2.1.0
+
+# Variables de entorno
+python-dotenv==1.0.0
+
+# Cliente HTTP para APIs externas
+requests==2.31.0
+urllib3==2.5.0
+
+# OpenAI para chatbot IA
+openai==2.3.0
+
+# Utilidades esenciales
+typing-extensions==4.15.0
+certifi==2025.10.5
+charset-normalizer==3.4.3
+idna==3.10
+
+# Zona horaria
+pytz==2023.3
+
+# Servidor para producción
+gunicorn==23.0.0
+whitenoise==6.5.0
+
+# Testing (opcional)
+pytest==8.4.2
+pytest-django==4.11.1
+
+# JSON Schema para validaciones
+jsonschema==4.25.1
+jsonschema-specifications==2025.9.1

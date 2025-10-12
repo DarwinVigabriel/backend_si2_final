@@ -1,0 +1,294 @@
+{
+  "CooperativaAgricola": {
+    "informacionGeneral": {
+      "nombreEmpresa": "Cooperativa Agrícola Integral",
+      "direccion": "Santa Cruz de la Sierra, Bolivia",
+      "telefono": "(591) 3-XXX-XXXX",
+      "correoElectronico": "info@cooperativaagricola.com",
+      "filosofiaEmpresa": "Fomentar el desarrollo sostenible agrícola, apoyar a los productores locales y promover prácticas agrícolas responsables y productivas."
+    },
+    "serviciosCooperativa": {
+      "creditoAgricola": {
+        "descripcion": "Créditos accesibles para financiar actividades agrícolas, con tasas preferenciales para socios.",
+        "beneficios": [
+          "Tasas de interés reducidas (8-12% anual)",
+          "Plazos flexibles hasta 36 meses",
+          "Sin requisitos de aval para montos pequeños",
+          "Asesoría técnica incluida",
+          "Pago en cuotas adaptadas a ciclos agrícolas"
+        ],
+        "requisitos": [
+          "Ser socio activo de la cooperativa",
+          "Presentar plan de negocio agrícola",
+          "Tener parcela registrada",
+          "Historial crediticio favorable",
+          "Garantía según monto solicitado"
+        ],
+        "tiposCredito": {
+          "creditoSemillas": {
+            "montoMaximo": 50000,
+            "plazoMaximo": 12,
+            "tasaInteres": 8.5,
+            "destino": "Compra de semillas certificadas"
+          },
+          "creditoInsumos": {
+            "montoMaximo": 100000,
+            "plazoMaximo": 18,
+            "tasaInteres": 9.0,
+            "destino": "Fertilizantes, pesticidas, maquinaria agrícola"
+          },
+          "creditoCosecha": {
+            "montoMaximo": 150000,
+            "plazoMaximo": 24,
+            "tasaInteres": 10.0,
+            "destino": "Financiamiento de cosecha y comercialización"
+          }
+        }
+      },
+      "suministroSemillas": {
+        "descripcion": "Semillas certificadas de alta calidad para diversos cultivos.",
+        "productosDisponibles": [
+          "Maíz híbrido",
+          "Soya transgénica",
+          "Trigo",
+          "Arroz",
+          "Quinoa",
+          "Papa",
+          "Tomate",
+          "Cebolla",
+          "Zanahoria"
+        ],
+        "beneficios": [
+          "Semillas certificadas y tratadas",
+          "Tecnología mejorada de rendimiento",
+          "Resistencia a plagas y enfermedades",
+          "Asesoría técnica incluida",
+          "Precios preferenciales para socios"
+        ],
+        "preciosReferenciales": {
+          "maiz": {"precioKg": 25, "rendimientoEsperado": "8-10 qq/ha"},
+          "soya": {"precioKg": 35, "rendimientoEsperado": "25-30 qq/ha"},
+          "trigo": {"precioKg": 20, "rendimientoEsperado": "40-50 qq/ha"}
+        }
+      },
+      "suministroInsumos": {
+        "descripcion": "Fertilizantes, pesticidas y otros insumos agrícolas de calidad.",
+        "categorias": {
+          "fertilizantes": [
+            "Urea",
+            "DAP (Fosfato diamónico)",
+            "NPK balanceado",
+            "Cal dolomita",
+            "Sulfato de amonio"
+          ],
+          "pesticidas": [
+            "Herbicidas selectivos",
+            "Insecticidas sistémicos",
+            "Fungicidas preventivos",
+            "Acaricidas"
+          ],
+          "otrosInsumos": [
+            "Combustible agrícola",
+            "Aceites lubricantes",
+            "Repuestos maquinaria",
+            "Mallas antiáfidos",
+            "Sistemas de riego"
+          ]
+        },
+        "beneficios": [
+          "Productos certificados y de calidad",
+          "Asesoría en uso correcto",
+          "Precios competitivos",
+          "Entrega a domicilio",
+          "Garantía de satisfacción"
+        ]
+      },
+      "asesoriaTecnica": {
+        "descripcion": "Servicio de asesoría técnica especializada en agricultura.",
+        "serviciosOfrecidos": [
+          "Análisis de suelos",
+          "Recomendaciones de fertilización",
+          "Control integrado de plagas",
+          "Manejo de cultivos",
+          "Tecnología de riego",
+          "Conservación de suelos",
+          "Buenas prácticas agrícolas"
+        ],
+        "beneficios": [
+          "Aumento de productividad",
+          "Reducción de costos",
+          "Mejores prácticas ambientales",
+          "Acceso a tecnología actualizada",
+          "Seguimiento personalizado"
+        ]
+      },
+      "comercializacion": {
+        "descripcion": "Apoyo en la comercialización de productos agrícolas.",
+        "servicios": [
+          "Almacenamiento y acopio",
+          "Clasificación y empaque",
+          "Conexión con mercados",
+          "Exportación asistida",
+          "Precios de referencia",
+          "Contratos forward"
+        ],
+        "cadenaValor": [
+          "Recepción de cosecha",
+          "Clasificación por calidad",
+          "Almacenamiento adecuado",
+          "Conexión con compradores",
+          "Logística de distribución"
+        ]
+      }
+    },
+    "cultivosSoportados": {
+      "maiz": {
+        "ciclo": "120-150 días",
+        "requerimientos": {
+          "temperatura": "20-30°C",
+          "precipitacion": "600-800 mm",
+          "suelo": "pH 5.5-7.0, bien drenado"
+        },
+        "practicasRecomendadas": [
+          "Siembra en surcos cada 70-80 cm",
+          "Densidad: 50,000-60,000 plantas/ha",
+          "Fertilización: 150-200 kg/ha NPK",
+          "Control de malezas en primeras 4 semanas",
+          "Riego suplementario en floración"
+        ],
+        "rendimientoEsperado": "6-10 qq/ha",
+        "problemasComunes": ["Plaga de gusano cogollero", "Deficiencia de nitrógeno", "Estrés hídrico"]
+      },
+      "soya": {
+        "ciclo": "90-120 días",
+        "requerimientos": {
+          "temperatura": "20-28°C",
+          "precipitacion": "500-700 mm",
+          "suelo": "pH 6.0-7.0, fértil"
+        },
+        "practicasRecomendadas": [
+          "Siembra directa o convencional",
+          "Densidad: 300,000-350,000 plantas/ha",
+          "Inoculación con rizobio",
+          "Control de plantas daninhas",
+          "Monitoreo de enfermedades"
+        ],
+        "rendimientoEsperado": "20-35 qq/ha",
+        "problemasComunes": ["Mildiu", "Oídio", "Ácaros", "Deficiencia de fósforo"]
+      },
+      "trigo": {
+        "ciclo": "90-110 días",
+        "requerimientos": {
+          "temperatura": "15-25°C",
+          "precipitacion": "400-600 mm",
+          "suelo": "pH 6.0-7.5, rico en materia orgánica"
+        },
+        "practicasRecomendadas": [
+          "Siembra en otoño/invierno",
+          "Densidad: 120-150 kg/ha",
+          "Fertilización nitrogenada en macollaje",
+          "Control de roya",
+          "Cosecha en madurez"
+        ],
+        "rendimientoEsperado": "30-50 qq/ha",
+        "problemasComunes": ["Roya", "Mancha foliar", "Ácaros", "Deficiencia nutricional"]
+      }
+    },
+    "procesoAfiliacion": {
+      "requisitosBasicos": [
+        "Ser mayor de 18 años",
+        "Tener parcela agrícola propia o arrendada",
+        "Presentar documento de identidad válido",
+        "Carta de intención de afiliación",
+        "Pago de cuota inicial de ingreso"
+      ],
+      "documentacionRequerida": [
+        "Cédula de identidad o NIT",
+        "Título de propiedad o contrato de arrendamiento",
+        "Certificado de antecedentes penales",
+        "Referencias comerciales (2)",
+        "Declaración jurada de actividades agrícolas"
+      ],
+      "pasosAfiliacion": [
+        "Solicitud inicial y entrega de documentación",
+        "Evaluación por comité de admisión",
+        "Visita técnica a la parcela",
+        "Aprobación y firma de contrato",
+        "Pago de cuota social",
+        "Capacitación inicial",
+        "Entrega de credenciales"
+      ],
+      "cuotasSociales": {
+        "cuotaIngreso": 500,
+        "cuotaMensual": 50,
+        "cuotaExtraordinaria": 100
+      },
+      "beneficiosAfiliacion": [
+        "Acceso a créditos preferenciales",
+        "Precios reducidos en insumos",
+        "Asesoría técnica gratuita",
+        "Participación en decisiones",
+        "Apoyo en comercialización",
+        "Capacitaciones continuas"
+      ]
+    },
+    "politicasCooperativa": {
+      "codigoEtica": [
+        "Respeto al medio ambiente",
+        "Prácticas agrícolas sostenibles",
+        "Transparencia en operaciones",
+        "Solidaridad entre socios",
+        "Compromiso con la calidad"
+      ],
+      "politicasCredito": {
+        "evaluacionRiesgo": "Basada en capacidad de pago y garantía",
+        "plazosPago": "Adaptados a ciclos agrícolas",
+        "mora": "Interés moratorio 2% mensual",
+        "reestructuracion": "Posible con justificación técnica"
+      },
+      "politicasAmbientales": [
+        "Uso responsable de agroquímicos",
+        "Conservación de suelos",
+        "Manejo integrado de plagas",
+        "Preservación de biodiversidad",
+        "Reducción de huella de carbono"
+      ]
+    }
+  },
+  "faq": [
+    {
+      "pregunta": "¿Cómo puedo afiliarme a la cooperativa?",
+      "respuesta": "Para afiliarte, debes ser mayor de 18 años, tener una parcela agrícola, completar el formulario de solicitud y presentar la documentación requerida. El proceso incluye evaluación técnica y aprobación por el comité de admisión."
+    },
+    {
+      "pregunta": "¿Qué beneficios obtengo al ser socio?",
+      "respuesta": "Como socio obtienes acceso a créditos preferenciales, precios reducidos en insumos, asesoría técnica gratuita, participación en decisiones cooperativas, apoyo en comercialización y capacitaciones continuas."
+    },
+    {
+      "pregunta": "¿Cómo solicitar un crédito agrícola?",
+      "respuesta": "Para solicitar un crédito, presenta un plan de negocio agrícola detallado, especifica el destino del crédito y proporciona la garantía correspondiente. El comité evaluará tu solicitud basado en viabilidad técnica y capacidad de pago."
+    },
+    {
+      "pregunta": "¿Qué tipos de semillas ofrecen?",
+      "respuesta": "Ofrecemos semillas certificadas de maíz híbrido, soya transgénica, trigo, arroz, quinoa, papa y hortalizas. Todas nuestras semillas incluyen tratamiento fitosanitario y tecnología mejorada para mayor rendimiento."
+    },
+    {
+      "pregunta": "¿Ofrecen asesoría técnica?",
+      "respuesta": "Sí, brindamos asesoría técnica especializada en análisis de suelos, recomendaciones de fertilización, control integrado de plagas, manejo de cultivos, tecnología de riego y buenas prácticas agrícolas."
+    },
+    {
+      "pregunta": "¿Cómo funciona la comercialización de productos?",
+      "respuesta": "Apoyamos la comercialización mediante acopio, clasificación, almacenamiento, conexión con mercados y asistencia en exportación. Proporcionamos precios de referencia y ayudamos en la negociación de contratos."
+    },
+    {
+      "pregunta": "¿Qué requisitos necesito para una parcela?",
+      "respuesta": "Necesitas título de propiedad o contrato de arrendamiento válido, acceso a agua para riego, suelo apto para agricultura y cumplimiento de normativas ambientales. Realizamos una visita técnica para evaluar la viabilidad."
+    }
+  ],
+  "politicas": {
+    "tiempo_espera_credito": "15 días para evaluación de solicitud",
+    "requisitos_parcela": "Mínimo 1 hectárea, acceso a agua, suelo cultivable",
+    "politica_calidad": "Solo productos certificados y de calidad garantizada",
+    "compromiso_medio_ambiente": "Prácticas agrícolas sostenibles y responsables"
+  }
+}

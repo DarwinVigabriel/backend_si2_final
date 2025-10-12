@@ -1,0 +1,13 @@
+# Dependencias de desarrollo adicionales
+-r requirements.txt
+
+# Testing con versiones instaladas
+pytest==8.4.2
+pytest-django==4.11.1
+
+# Herramientas de desarrollo (instalar bajo demanda)
+# django-debug-toolbar
+# ipython
+# black
+# flake8
+# isort

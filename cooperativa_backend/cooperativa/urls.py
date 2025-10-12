@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
+from .apps.chatbot import urls as chatbot_urls
 
 # Crear router para ViewSets
 router = DefaultRouter()
@@ -81,4 +82,7 @@ urlpatterns = [
 
     # Incluir rutas del router DESPUÉS de los endpoints específicos
     path('api/', include(router.urls)),
+
+    # Incluir todas las URLs del chatbot bajo el prefijo chatbot/
+    path('chatbot/', include(chatbot_urls)),
 ]
