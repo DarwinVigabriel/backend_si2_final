@@ -1,25 +1,85 @@
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
 *.pyc
 *.pyo
 *.pyd
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/static/
+/staticfiles/
+/media/
+
+# Entornos virtuales
 venv/
 .venv/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
+env.bak/
+venv.bak/
+
+# Variables de entorno
+.env.local
+.env.development
+.env.production
+
+# IDEs y editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing y coverage
 .coverage
 .coverage.*
+htmlcov/
+.tox/
 .cache
 nosetests.xml
 coverage.xml
 *.cover
-*.log
-.git
+.hypothesis/
+.pytest_cache/
 .mypy_cache
-.pytest_cache
-.hypothesis
+
+# Logs y temporales
+logs/
+*.log
+tmp/
+temp/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node modules
 node_modules/
-.DS_Store
-.vscode/
-.idea/
+
+# Archivos locales del desarrollador
+local_config.py
+*.local
+*.backup
+*.bak

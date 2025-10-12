@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot Agrícola Inteligente - Prueba</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+
+        .header p {
+            margin: 5px 0 0 0;
+            opacity: 0.8;
+        }
+
+        .chat-container {
+            height: 500px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 12px 16px;
+            border-radius: 18px;
+            max-width: 70%;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .message.user {
+            background: #007bff;
+            color: white;
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot {
+            background: white;
+            color: #333;
+            border: 1px solid #e9ecef;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .message .sender {
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 4px;
+            opacity: 0.7;
+        }
+
+        .input-container {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e9ecef;
+            display: flex;
+            gap: 10px;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 25px;
+            outline: none;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .message-input:focus {
+            border-color: #007bff;
+        }
+
+        .send-button {
+            padding: 12px 24px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+
+        .send-button:hover {
+            background: #218838;
+        }
+
+        .send-button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            background: #d4edda;
+            color: #155724;
+            border-bottom: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border-bottom-color: #f5c6cb;
+        }
+
+        .quick-buttons {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .quick-button {
+            padding: 6px 12px;
+            background: #e9ecef;
+            color: #495057;
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .quick-button:hover {
+            background: #007bff;
+            color: white;
+        }
+
+        .info-panel {
+            padding: 15px 20px;
+            background: #e7f3ff;
+            border-bottom: 1px solid #b3d7ff;
+            font-size: 14px;
+        }
+
+        .info-panel strong {
+            color: #0056b3;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌾 Chatbot Agrícola Inteligente</h1>
+            <p>Cooperativa Agrícola Integral - Sistema de Información 2</p>
+        </div>
+
+        <div class="info-panel">
+            <strong>Cliente ID:</strong> <span id="cliente-id">demo_user_001</span> |
+            <strong>Estado:</strong> <span id="connection-status">Conectando...</span>
+        </div>
+
+        <div class="quick-buttons">
+            <button class="quick-button" onclick="sendQuickMessage('Hola, me llamo Juan Pérez')">👋 Presentarme</button>
+            <button class="quick-button" onclick="sendQuickMessage('Necesito información sobre créditos agrícolas')">💰 Créditos</button>
+            <button class="quick-button" onclick="sendQuickMessage('¿Qué semillas tienen disponibles?')">🌱 Semillas</button>
+            <button class="quick-button" onclick="sendQuickMessage('Necesito asesoría técnica')">👨‍🌾 Asesoría</button>
+            <button class="quick-button" onclick="sendQuickMessage('¿Cómo me afilio a la cooperativa?')">📝 Afiliación</button>
+            <button class="quick-button" onclick="sendQuickMessage('Tengo 40 años y cultivo maíz')">👤 Mi perfil</button>
+        </div>
+
+        <div class="chat-container">
+            <div id="chat-messages" class="chat-messages">
+                <div class="message bot">
+                    <div class="sender">🤖 Asistente Agrícola</div>
+                    ¡Hola! Soy tu asistente inteligente de la Cooperativa Agrícola Integral.
+                    ¿En qué puedo ayudarte con tu actividad agrícola hoy?
+                </div>
+            </div>
+
+            <div class="input-container">
+                <input
+                    type="text"
+                    id="message-input"
+                    class="message-input"
+                    placeholder="Escribe tu mensaje aquí..."
+                    onkeypress="handleKeyPress(event)"
+                >
+                <button id="send-button" class="send-button" onclick="sendMessage()">
+                    Enviar ✉️
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000/chatbot';
+        const CLIENTE_ID = 'demo_user_' + Date.now();
+        let isConnected = false;
+
+        // Actualizar elementos de la UI
+        document.getElementById('cliente-id').textContent = CLIENTE_ID;
+
+        // Verificar conexión con el servidor
+        async function checkConnection() {
+            try {
+                const response = await fetch(API_BASE + '/api/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: 'test',
+                        cliente_id: CLIENTE_ID
+                    })
+                });
+
+                if (response.ok) {
+                    isConnected = true;
+                    document.getElementById('connection-status').textContent = '✅ Conectado';
+                    document.getElementById('connection-status').style.color = '#28a745';
+                } else {
+                    throw new Error('Server error');
+                }
+            } catch (error) {
+                isConnected = false;
+                document.getElementById('connection-status').textContent = '❌ Desconectado';
+                document.getElementById('connection-status').style.color = '#dc3545';
+                console.error('Connection check failed:', error);
+            }
+        }
+
+        // Enviar mensaje al chatbot
+        async function sendMessage() {
+            const input = document.getElementById('message-input');
+            const button = document.getElementById('send-button');
+            const message = input.value.trim();
+
+            if (!message) return;
+            if (!isConnected) {
+                addMessage('❌ No hay conexión con el servidor. Asegúrate de que el servidor Django esté ejecutándose.', 'bot', 'error');
+                return;
+            }
+
+            // Deshabilitar input mientras se procesa
+            input.disabled = true;
+            button.disabled = true;
+            button.innerHTML = '<div class="loading"></div>';
+
+            // Agregar mensaje del usuario
+            addMessage(message, 'user');
+
+            // Limpiar input
+            input.value = '';
+
+            try {
+                const response = await fetch(API_BASE + '/api/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        cliente_id: CLIENTE_ID
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    addMessage(data.response, 'bot');
+                } else {
+                    const errorText = await response.text();
+                    addMessage(`❌ Error del servidor: ${response.status} - ${errorText}`, 'bot', 'error');
+                }
+            } catch (error) {
+                addMessage(`❌ Error de conexión: ${error.message}`, 'bot', 'error');
+                console.error('Send message error:', error);
+            } finally {
+                // Rehabilitar input
+                input.disabled = false;
+                button.disabled = false;
+                button.innerHTML = 'Enviar ✉️';
+
+                // Hacer scroll al final
+                scrollToBottom();
+            }
+        }
+
+        // Enviar mensaje rápido
+        function sendQuickMessage(message) {
+            document.getElementById('message-input').value = message;
+            sendMessage();
+        }
+
+        // Manejar tecla Enter
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        // Agregar mensaje al chat
+        function addMessage(text, sender, type = 'normal') {
+            const messagesContainer = document.getElementById('chat-messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}`;
+
+            if (type === 'error') {
+                messageDiv.classList.add('error');
+            }
+
+            const senderIcon = sender === 'user' ? '👤' : '🤖';
+            const senderName = sender === 'user' ? 'Tú' : 'Asistente Agrícola';
+
+            messageDiv.innerHTML = `
+                <div class="sender">${senderIcon} ${senderName}</div>
+                ${text.replace(/\n/g, '<br>')}
+            `;
+
+            messagesContainer.appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        // Hacer scroll al final del chat
+        function scrollToBottom() {
+            const messagesContainer = document.getElementById('chat-messages');
+            setTimeout(() => {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }, 100);
+        }
+
+        // Verificar conexión al cargar la página
+        window.addEventListener('load', () => {
+            checkConnection();
+            // Verificar conexión cada 30 segundos
+            setInterval(checkConnection, 30000);
+        });
+
+        // Mensaje de bienvenida mejorado
+        setTimeout(() => {
+            addMessage(
+                '💡 <strong>Consejos para probar:</strong><br>' +
+                '• Presentate con tu nombre<br>' +
+                '• Menciona tu edad y cultivos<br>' +
+                '• Pregunta sobre créditos, semillas o asesoría<br>' +
+                '• El chatbot recuerda toda la conversación',
+                'bot'
+            );
+        }, 1000);
+    </script>
+</body>
+</html>

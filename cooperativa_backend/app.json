@@ -1,0 +1,41 @@
+{
+  "name": "Sistema Cooperativa Agrícola",
+  "description": "Sistema web para gestión de cooperativa agrícola con chatbot IA",
+  "repository": "https://github.com/tu-usuario/tu-repositorio",
+  "keywords": ["django", "react", "chatbot", "agricultura", "cooperativa"],
+  "env": {
+    "SECRET_KEY": {
+      "description": "Clave secreta de Django",
+      "generator": "secret"
+    },
+    "DEBUG": {
+      "description": "Modo debug (True para desarrollo, False para producción)",
+      "value": "False"
+    },
+    "DATABASE_URL": {
+      "description": "URL de conexión a PostgreSQL",
+      "required": true
+    },
+    "OPENROUTER_API_KEY": {
+      "description": "API Key de OpenRouter para el chatbot IA",
+      "required": true
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "addons": [
+    "heroku-postgresql:essential-0"
+  ],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "scripts": {
+    "postdeploy": "python manage.py migrate && python manage.py collectstatic --noinput"
+  }
+}
