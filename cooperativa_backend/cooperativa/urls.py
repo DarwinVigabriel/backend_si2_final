@@ -27,6 +27,8 @@ router.register(r'semillas', views.SemillaViewSet)
 # CU8: ViewSets para gestión de insumos agrícolas
 router.register(r'pesticidas', views.PesticidaViewSet)
 router.register(r'fertilizantes', views.FertilizanteViewSet)
+# CU9: ViewSet para gestión de campañas agrícolas
+router.register(r'campaigns', views.CampaignViewSet)
 
 # URLs de la aplicación
 urlpatterns = [
@@ -75,6 +77,11 @@ urlpatterns = [
     # path('api/semillas/buscar-avanzado/', views.buscar_semillas_avanzado, name='buscar-semillas-avanzado'),
     # path('api/validar/semilla/', views.validar_semilla, name='validar-semilla'),
     # path('api/reportes/estadisticas-semillas/', views.estadisticas_semillas, name='estadisticas-semillas'),
+
+    # CU11: Endpoints de reportes de campañas
+    path('api/reports/labors-by-campaign/', views.report_labors_by_campaign, name='report-labors-by-campaign'),
+    path('api/reports/production-by-campaign/', views.report_production_by_campaign, name='report-production-by-campaign'),
+    path('api/reports/production-by-plot/', views.report_production_by_plot, name='report-production-by-plot'),
 
     # Nueva ruta para el endpoint de sesión de depuración
     path('api/auth/debug-session/', views.debug_session_status, name='debug-session'),

@@ -1,0 +1,1 @@
+# Tests para CU7 - Gestión de Semillas

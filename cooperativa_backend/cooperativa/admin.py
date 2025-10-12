@@ -772,3 +772,14 @@ class FertilizanteAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).order_by('-creado_en')
+
+
+# =============================================================================
+# IMPORTAR ADMINISTRACIÓN DE CAMPAÑAS (CU9 - SPRINT 2)
+# =============================================================================
+# Se importan las clases de administración de campañas desde admin_campaigns.py
+# Esto mantiene el código organizado y modular
+from .admin_campaigns import CampaignAdmin, CampaignPartnerAdmin, CampaignPlotAdmin
+
+# Las clases ya están registradas con @admin.register en admin_campaigns.py
+# No es necesario volver a registrarlas aquí

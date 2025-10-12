@@ -972,3 +972,266 @@ class FertilizanteSerializer(serializers.ModelSerializer):
             })
 
         return data
+
+
+        # ============================================================================
+# CU9: SERIALIZERS PARA GESTIÓN DE CAMPAÑAS AGRÍCOLAS
+# T036: Gestión de campañas (crear, editar, eliminar)
+# T037: Relación entre campaña y socios/parcelas
+# ============================================================================
+
+class CampaignPartnerSerializer(serializers.ModelSerializer):
+    """
+    CU9: Serializer para relación Campaign-Socio
+    T037: Relación entre campaña y socios
+    """
+    socio_nombre = serializers.CharField(source='socio.usuario.get_full_name', read_only=True)
+    socio_ci_nit = serializers.CharField(source='socio.usuario.ci_nit', read_only=True)
+    socio_codigo = serializers.CharField(source='socio.codigo_interno', read_only=True)
+
+    class Meta:
+        model = CampaignPartner
+        fields = [
+            'id', 'campaign', 'socio', 'socio_nombre', 'socio_ci_nit', 'socio_codigo',
+            'rol', 'fecha_asignacion', 'observaciones', 'creado_en'
+        ]
+        read_only_fields = ['creado_en']
+
+    def validate_socio(self, value):
+        """Validar que el socio esté activo"""
+        if value.estado != 'ACTIVO':
+            raise serializers.ValidationError('Solo se pueden asignar socios con estado ACTIVO')
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        campaign = data.get('campaign') or (self.instance.campaign if self.instance else None)
+        fecha_asignacion = data.get('fecha_asignacion')
+
+        if campaign and fecha_asignacion and fecha_asignacion < campaign.fecha_inicio:
+            raise serializers.ValidationError({
+                'fecha_asignacion': 'La fecha de asignación no puede ser anterior al inicio de la campaña'
+            })
+
+        return data
+
+
+class CampaignPlotSerializer(serializers.ModelSerializer):
+    """
+    CU9: Serializer para relación Campaign-Parcela
+    T037: Relación entre campaña y parcelas
+    """
+    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
+    parcela_superficie = serializers.DecimalField(
+        source='parcela.superficie_hectareas',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+    socio_nombre = serializers.CharField(source='parcela.socio.usuario.get_full_name', read_only=True)
+
+    class Meta:
+        model = CampaignPlot
+        fields = [
+            'id', 'campaign', 'parcela', 'parcela_nombre', 'parcela_superficie',
+            'socio_nombre', 'fecha_asignacion', 'superficie_comprometida',
+            'cultivo_planificado', 'meta_produccion_parcela', 'observaciones', 'creado_en'
+        ]
+        read_only_fields = ['creado_en']
+
+    def validate_parcela(self, value):
+        """Validar que la parcela esté activa"""
+        if value.estado != 'ACTIVA':
+            raise serializers.ValidationError('Solo se pueden asignar parcelas con estado ACTIVA')
+        return value
+
+    def validate_superficie_comprometida(self, value):
+        """Validar superficie comprometida"""
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('La superficie comprometida debe ser mayor a 0')
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        parcela = data.get('parcela') or (self.instance.parcela if self.instance else None)
+        superficie_comprometida = data.get('superficie_comprometida')
+        campaign = data.get('campaign') or (self.instance.campaign if self.instance else None)
+        fecha_asignacion = data.get('fecha_asignacion')
+
+        # Validar superficie
+        if parcela and superficie_comprometida:
+            if superficie_comprometida > parcela.superficie_hectareas:
+                raise serializers.ValidationError({
+                    'superficie_comprometida': f'La superficie comprometida no puede exceder la superficie total de la parcela ({parcela.superficie_hectareas} ha)'
+                })
+
+        # Validar fecha de asignación
+        if campaign and fecha_asignacion and fecha_asignacion < campaign.fecha_inicio:
+            raise serializers.ValidationError({
+                'fecha_asignacion': 'La fecha de asignación no puede ser anterior al inicio de la campaña'
+            })
+
+        return data
+
+
+class CampaignSerializer(serializers.ModelSerializer):
+    """
+    CU9: Serializer principal para Campaign
+    T036: Gestión de campañas (crear, editar, eliminar)
+    T037: Mostrar socios y parcelas en Campaign (serializers anidados)
+    """
+    # Campos calculados
+    duracion_dias = serializers.SerializerMethodField()
+    dias_restantes = serializers.SerializerMethodField()
+    progreso_temporal = serializers.SerializerMethodField()
+    puede_eliminar = serializers.SerializerMethodField()
+
+    # Serializers anidados para mostrar relaciones (solo lectura)
+    socios_asignados = CampaignPartnerSerializer(many=True, read_only=True)
+    parcelas = CampaignPlotSerializer(many=True, read_only=True)
+
+    # Información del responsable
+    responsable_nombre = serializers.CharField(source='responsable.get_full_name', read_only=True)
+
+    # Contadores
+    total_socios = serializers.SerializerMethodField()
+    total_parcelas = serializers.SerializerMethodField()
+    total_superficie = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Campaign
+        fields = [
+            'id', 'nombre', 'fecha_inicio', 'fecha_fin', 'meta_produccion',
+            'unidad_meta', 'estado', 'descripcion', 'presupuesto', 'responsable',
+            'responsable_nombre', 'creado_en', 'actualizado_en',
+            # Campos calculados
+            'duracion_dias', 'dias_restantes', 'progreso_temporal', 'puede_eliminar',
+            # Relaciones anidadas
+            'socios_asignados', 'parcelas',
+            # Contadores
+            'total_socios', 'total_parcelas', 'total_superficie'
+        ]
+        read_only_fields = ['creado_en', 'actualizado_en']
+
+    def get_duracion_dias(self, obj):
+        return obj.duracion_dias()
+
+    def get_dias_restantes(self, obj):
+        return obj.dias_restantes()
+
+    def get_progreso_temporal(self, obj):
+        return round(obj.progreso_temporal(), 2)
+
+    def get_puede_eliminar(self, obj):
+        return obj.puede_eliminar()
+
+    def get_total_socios(self, obj):
+        return obj.socios_asignados.count()
+
+    def get_total_parcelas(self, obj):
+        return obj.parcelas.count()
+
+    def get_total_superficie(self, obj):
+        from django.db.models import Sum
+        resultado = obj.parcelas.aggregate(
+            total=Sum('superficie_comprometida')
+        )
+        return resultado['total'] or 0
+
+    def validate_nombre(self, value):
+        """Validar que el nombre sea único"""
+        instance_id = self.instance.id if self.instance else None
+        queryset = Campaign.objects.filter(nombre__iexact=value)
+        if instance_id:
+            queryset = queryset.exclude(id=instance_id)
+
+        if queryset.exists():
+            raise serializers.ValidationError('Ya existe una campaña con este nombre')
+        return value
+
+    def validate_meta_produccion(self, value):
+        """Validar meta de producción"""
+        if value <= 0:
+            raise serializers.ValidationError('La meta de producción debe ser mayor a 0')
+        return value
+
+    def validate_presupuesto(self, value):
+        """Validar presupuesto"""
+        if value is not None and value < 0:
+            raise serializers.ValidationError('El presupuesto no puede ser negativo')
+        return value
+
+    def validate(self, data):
+        """
+        Validaciones entre campos
+        T036: Validaciones (fecha_fin > fecha_inicio, no solapes)
+        """
+        fecha_inicio = data.get('fecha_inicio') or (self.instance.fecha_inicio if self.instance else None)
+        fecha_fin = data.get('fecha_fin') or (self.instance.fecha_fin if self.instance else None)
+
+        # Validar fecha_fin > fecha_inicio
+        if fecha_inicio and fecha_fin and fecha_fin <= fecha_inicio:
+            raise serializers.ValidationError({
+                'fecha_fin': 'La fecha de fin debe ser posterior a la fecha de inicio'
+            })
+
+        # Validar solape de fechas con otras campañas
+        if fecha_inicio and fecha_fin:
+            self._validar_solape_fechas(fecha_inicio, fecha_fin)
+
+        return data
+
+    def _validar_solape_fechas(self, fecha_inicio, fecha_fin):
+        """
+        Valida que no haya solape de fechas con otras campañas activas
+        T036: Validación de no solapes entre campañas
+        """
+        from django.db.models import Q
+
+        queryset = Campaign.objects.filter(
+            Q(estado__in=['PLANIFICADA', 'EN_CURSO']) &
+            (
+                Q(fecha_inicio__lte=fecha_inicio, fecha_fin__gte=fecha_inicio) |
+                Q(fecha_inicio__lte=fecha_fin, fecha_fin__gte=fecha_fin) |
+                Q(fecha_inicio__gte=fecha_inicio, fecha_fin__lte=fecha_fin)
+            )
+        )
+
+        # Excluir la instancia actual si es una actualización
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+
+        if queryset.exists():
+            campañas_solapadas = ', '.join([c.nombre for c in queryset])
+            raise serializers.ValidationError({
+                'fecha_inicio': f'Las fechas se solapan con las siguientes campañas: {campañas_solapadas}. '
+                               f'No puede haber campañas simultáneas.'
+            })
+
+
+class CampaignListSerializer(serializers.ModelSerializer):
+    """
+    CU9: Serializer simplificado para listados de campañas (sin relaciones anidadas)
+    T036: Optimización de consultas para listados
+    """
+    responsable_nombre = serializers.CharField(source='responsable.get_full_name', read_only=True)
+    duracion_dias = serializers.SerializerMethodField()
+    total_socios = serializers.SerializerMethodField()
+    total_parcelas = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Campaign
+        fields = [
+            'id', 'nombre', 'fecha_inicio', 'fecha_fin', 'meta_produccion',
+            'unidad_meta', 'estado', 'responsable_nombre', 'duracion_dias',
+            'total_socios', 'total_parcelas', 'creado_en'
+        ]
+
+    def get_duracion_dias(self, obj):
+        return obj.duracion_dias()
+
+    def get_total_socios(self, obj):
+        return obj.socios_asignados.count()
+
+    def get_total_parcelas(self, obj):
+        return obj.parcelas.count()

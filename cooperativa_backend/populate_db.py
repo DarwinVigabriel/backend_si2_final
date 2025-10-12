@@ -11,7 +11,103 @@ from django.utils import timezone
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cooperativa_backend.settings')
 django.setup()
 
-from cooperativa.models import Rol, Usuario, Comunidad, Socio, Parcela, Cultivo, Semilla, Pesticida, Fertilizante
+from cooperativa.models import (
+    Rol, Usuario, Comunidad, Socio, Parcela, Cultivo, 
+    Semilla, Pesticida, Fertilizante,
+    Campaign, CampaignPartner, CampaignPlot,
+    CicloCultivo, Tratamiento, Cosecha
+)
+from django.db.models import Sum
+from datetime import datetime, timedelta, date
+from decimal import Decimal
+import random
+
+
+def limpiar_base_datos():
+    """Elimina TODOS los datos excepto el superusuario admin de Django"""
+    print("\n🗑️  LIMPIANDO BASE DE DATOS...")
+    print("⚠️  Se eliminarán TODOS los datos (excepto admin de Django)\n")
+    
+    # Contar antes de eliminar
+    print("📊 Datos actuales:")
+    print(f"   Usuarios: {Usuario.objects.count()}")
+    print(f"   Socios: {Socio.objects.count()}")
+    print(f"   Parcelas: {Parcela.objects.count()}")
+    print(f"   Cultivos: {Cultivo.objects.count()}")
+    print(f"   Semillas: {Semilla.objects.count()}")
+    print(f"   Pesticidas: {Pesticida.objects.count()}")
+    print(f"   Fertilizantes: {Fertilizante.objects.count()}")
+    print(f"   Campañas: {Campaign.objects.count()}")
+    print(f"   Ciclos: {CicloCultivo.objects.count()}")
+    print(f"   Tratamientos: {Tratamiento.objects.count()}")
+    print(f"   Cosechas: {Cosecha.objects.count()}")
+    
+    # Eliminar en orden (respetando relaciones FK)
+    print("\n🔄 Eliminando datos...")
+    
+    # 1. Cosechas (dependen de CicloCultivo)
+    Cosecha.objects.all().delete()
+    print("   ✓ Cosechas eliminadas")
+    
+    # 2. Tratamientos (dependen de CicloCultivo)
+    Tratamiento.objects.all().delete()
+    print("   ✓ Tratamientos eliminados")
+    
+    # 3. Ciclos de cultivo (dependen de Cultivo)
+    CicloCultivo.objects.all().delete()
+    print("   ✓ Ciclos de cultivo eliminados")
+    
+    # 4. Asignaciones de campañas
+    CampaignPlot.objects.all().delete()
+    CampaignPartner.objects.all().delete()
+    print("   ✓ Asignaciones de campañas eliminadas")
+    
+    # 5. Campañas
+    Campaign.objects.all().delete()
+    print("   ✓ Campañas eliminadas")
+    
+    # 6. Insumos (CU7 y CU8)
+    Semilla.objects.all().delete()
+    Pesticida.objects.all().delete()
+    Fertilizante.objects.all().delete()
+    print("   ✓ Insumos eliminados (semillas, pesticidas, fertilizantes)")
+    
+    # 7. Cultivos (dependen de Parcela)
+    Cultivo.objects.all().delete()
+    print("   ✓ Cultivos eliminados")
+    
+    # 8. Parcelas (dependen de Socio)
+    Parcela.objects.all().delete()
+    print("   ✓ Parcelas eliminadas")
+    
+    # 9. Socios (dependen de Usuario)
+    Socio.objects.all().delete()
+    print("   ✓ Socios eliminados")
+    
+    # 10. Usuarios (excepto superusuarios)
+    usuarios_eliminados = Usuario.objects.exclude(is_superuser=True).count()
+    Usuario.objects.exclude(is_superuser=True).delete()
+    print(f"   ✓ Usuarios eliminados ({usuarios_eliminados})")
+    
+    # 11. Comunidades
+    Comunidad.objects.all().delete()
+    print("   ✓ Comunidades eliminadas")
+    
+    # 12. Roles
+    Rol.objects.all().delete()
+    print("   ✓ Roles eliminados")
+    
+    print("\n✅ Base de datos limpiada!")
+    print(f"   Admin preservado: {Usuario.objects.filter(is_superuser=True).count()} superusuario(s)\n")
+
+
+def convertir_fecha(fecha_str):
+    """Convierte una fecha string 'YYYY-MM-DD' a objeto date"""
+    if isinstance(fecha_str, str):
+        year, month, day = map(int, fecha_str.split('-'))
+        return date(year, month, day)
+    return fecha_str
+
 
 def crear_datos_prueba():
     print("Verificando y creando datos de prueba...")
@@ -404,6 +500,10 @@ def poblar_datos_cu7_cu8():
     print("Creando semillas de ejemplo...")
     semillas_creadas = 0
     for semilla_data in semillas_data:
+        # Convertir fecha de vencimiento a objeto date
+        if 'fecha_vencimiento' in semilla_data:
+            semilla_data['fecha_vencimiento'] = convertir_fecha(semilla_data['fecha_vencimiento'])
+        
         lote = semilla_data['lote']
         if not Semilla.objects.filter(lote=lote).exists():
             Semilla.objects.create(**semilla_data)
@@ -592,6 +692,10 @@ def poblar_datos_cu7_cu8():
     print("Creando pesticidas de ejemplo...")
     pesticidas_creados = 0
     for pesticida_data in pesticidas_data:
+        # Convertir fecha de vencimiento a objeto date
+        if 'fecha_vencimiento' in pesticida_data:
+            pesticida_data['fecha_vencimiento'] = convertir_fecha(pesticida_data['fecha_vencimiento'])
+        
         lote = pesticida_data['lote']
         if not Pesticida.objects.filter(lote=lote).exists():
             Pesticida.objects.create(**pesticida_data)
@@ -759,6 +863,10 @@ def poblar_datos_cu7_cu8():
     print("Creando fertilizantes de ejemplo...")
     fertilizantes_creados = 0
     for fertilizante_data in fertilizantes_data:
+        # Convertir fecha de vencimiento a objeto date
+        if 'fecha_vencimiento' in fertilizante_data:
+            fertilizante_data['fecha_vencimiento'] = convertir_fecha(fertilizante_data['fecha_vencimiento'])
+        
         lote = fertilizante_data['lote']
         if not Fertilizante.objects.filter(lote=lote).exists():
             Fertilizante.objects.create(**fertilizante_data)
@@ -777,6 +885,494 @@ def poblar_datos_cu7_cu8():
     print(f"   Total insumos: {Semilla.objects.count() + Pesticida.objects.count() + Fertilizante.objects.count()}")
 
 
+def poblar_datos_campanas():
+    """Poblar datos de ejemplo para CU9 (Campañas Agrícolas) - SPRINT 2"""
+    print("\n🌾 Poblando datos de CU9 (Campañas Agrícolas - Sprint 2)...")
+
+    # Obtener usuarios y socios existentes
+    try:
+        admin_user = Usuario.objects.get(usuario='admin')
+    except Usuario.DoesNotExist:
+        print("⚠️ Usuario admin no encontrado. Ejecuta primero crear_datos_prueba()")
+        return
+
+    try:
+        operador_user = Usuario.objects.get(usuario='operador1')
+    except Usuario.DoesNotExist:
+        operador_user = admin_user
+        print("⚠️ Usuario operador1 no encontrado. Usando admin como responsable")
+
+    # Obtener socios para asignar a campañas
+    socios = list(Socio.objects.all())
+    if len(socios) < 2:
+        print("⚠️ Se necesitan al menos 2 socios. Ejecuta primero crear_datos_prueba()")
+        return
+
+    # Obtener parcelas para asignar a campañas
+    parcelas = list(Parcela.objects.filter(estado='ACTIVA'))
+    if len(parcelas) < 2:
+        print("⚠️ Se necesitan al menos 2 parcelas activas. Ejecuta primero crear_datos_prueba()")
+        return
+
+    # Datos de campañas de ejemplo
+    campanas_data = [
+        {
+            'nombre': 'Campaña de Maíz 2025-2026',
+            'descripcion': 'Campaña agrícola enfocada en la producción de maíz híbrido de alto rendimiento para la temporada 2025-2026. Incluye capacitación técnica, asistencia agronómica y comercialización garantizada.',
+            'fecha_inicio': datetime.now().date(),
+            'fecha_fin': (datetime.now() + timedelta(days=180)).date(),
+            'meta_produccion': Decimal('5000.00'),
+            'unidad_meta': 'kg',
+            'estado': 'EN_CURSO',
+            'presupuesto': Decimal('25000.00'),
+            'responsable': operador_user,
+            'socios_asignados': 2,
+            'parcelas_asignadas': 2
+        },
+        {
+            'nombre': 'Campaña de Papa Orgánica 2026',
+            'descripcion': 'Producción de papa orgánica certificada con prácticas agroecológicas. Uso exclusivo de insumos orgánicos, rotación de cultivos y manejo integrado de plagas. Mercado objetivo: exportación.',
+            'fecha_inicio': (datetime.now() + timedelta(days=200)).date(),
+            'fecha_fin': (datetime.now() + timedelta(days=380)).date(),
+            'meta_produccion': Decimal('8000.00'),
+            'unidad_meta': 'kg',
+            'estado': 'PLANIFICADA',
+            'presupuesto': Decimal('35000.00'),
+            'responsable': operador_user,
+            'socios_asignados': 2,
+            'parcelas_asignadas': 2
+        },
+        {
+            'nombre': 'Campaña de Quinoa Real 2026',
+            'descripcion': 'Cultivo de quinoa real boliviana con certificación orgánica y de comercio justo. Incluye programa de mejoramiento genético y acceso a mercados internacionales premium.',
+            'fecha_inicio': (datetime.now() + timedelta(days=400)).date(),
+            'fecha_fin': (datetime.now() + timedelta(days=580)).date(),
+            'meta_produccion': Decimal('3000.00'),
+            'unidad_meta': 'kg',
+            'estado': 'PLANIFICADA',
+            'presupuesto': Decimal('40000.00'),
+            'responsable': admin_user,
+            'socios_asignados': 1,
+            'parcelas_asignadas': 1
+        },
+        {
+            'nombre': 'Campaña de Trigo Invierno 2024',
+            'descripcion': 'Campaña finalizada de producción de trigo panadero. Resultados exitosos con rendimientos superiores al promedio nacional. Incluye análisis de calidad y almacenamiento.',
+            'fecha_inicio': (datetime.now() - timedelta(days=300)).date(),
+            'fecha_fin': (datetime.now() - timedelta(days=120)).date(),
+            'meta_produccion': Decimal('6000.00'),
+            'unidad_meta': 'kg',
+            'estado': 'FINALIZADA',
+            'presupuesto': Decimal('30000.00'),
+            'responsable': operador_user,
+            'socios_asignados': 2,
+            'parcelas_asignadas': 2
+        },
+        {
+            'nombre': 'Campaña de Hortalizas Diversificadas 2024',
+            'descripcion': 'Producción diversificada de hortalizas: tomate, cebolla, zanahoria y lechuga. Sistema de riego por goteo y cultivo en invernadero. Comercialización en mercados locales.',
+            'fecha_inicio': (datetime.now() - timedelta(days=100)).date(),
+            'fecha_fin': (datetime.now() - timedelta(days=10)).date(),
+            'meta_produccion': Decimal('2500.00'),
+            'unidad_meta': 'kg',
+            'estado': 'FINALIZADA',
+            'presupuesto': Decimal('18000.00'),
+            'responsable': admin_user,
+            'socios_asignados': 1,
+            'parcelas_asignadas': 1
+        }
+    ]
+
+    # Crear campañas con sus relaciones
+    print("Creando campañas con socios y parcelas asignados...")
+    campanas_creadas = 0
+    
+    for i, campana_data in enumerate(campanas_data):
+        nombre = campana_data['nombre']
+        
+        # Extraer datos de asignación
+        socios_count = campana_data.pop('socios_asignados')
+        parcelas_count = campana_data.pop('parcelas_asignadas')
+        
+        if not Campaign.objects.filter(nombre=nombre).exists():
+            # Crear campaña
+            campana = Campaign.objects.create(**campana_data)
+            campanas_creadas += 1
+            print(f"✓ Campaña '{nombre}' creada")
+            
+            # Asignar socios a la campaña
+            roles_socios = ['COORDINADOR', 'PRODUCTOR', 'TECNICO', 'SUPERVISOR']
+            for j in range(min(socios_count, len(socios))):
+                socio = socios[j % len(socios)]
+                rol = roles_socios[j % len(roles_socios)]
+                
+                CampaignPartner.objects.create(
+                    campaign=campana,
+                    socio=socio,
+                    rol=rol,
+                    fecha_asignacion=campana.fecha_inicio,
+                    observaciones=f'Asignado como {rol.lower()} en la campaña {campana.nombre}'
+                )
+                print(f"  ↳ Socio {socio.codigo_interno} asignado como {rol}")
+            
+            # Asignar parcelas a la campaña
+            cultivos = ['Maíz', 'Papa', 'Quinoa', 'Trigo', 'Tomate', 'Cebolla']
+            for k in range(min(parcelas_count, len(parcelas))):
+                parcela = parcelas[k % len(parcelas)]
+                
+                # Calcular superficie comprometida (entre 50% y 100% de la parcela)
+                porcentaje = 0.7 + (k * 0.1)  # 70%, 80%, 90%, 100%
+                superficie_comprometida = float(parcela.superficie_hectareas) * porcentaje
+                
+                # Calcular meta de producción por parcela (proporción de meta total)
+                meta_parcela = float(campana.meta_produccion) * (superficie_comprometida / (float(parcela.superficie_hectareas) * parcelas_count))
+                
+                CampaignPlot.objects.create(
+                    campaign=campana,
+                    parcela=parcela,
+                    fecha_asignacion=campana.fecha_inicio,
+                    superficie_comprometida=Decimal(str(round(superficie_comprometida, 2))),
+                    cultivo_planificado=cultivos[k % len(cultivos)],
+                    meta_produccion_parcela=Decimal(str(round(meta_parcela, 2))),
+                    observaciones=f'Parcela asignada a campaña {campana.nombre} con {porcentaje*100:.0f}% de superficie'
+                )
+                print(f"  ↳ Parcela '{parcela.nombre}' asignada ({superficie_comprometida:.2f} ha)")
+        else:
+            print(f"✓ Campaña '{nombre}' ya existe")
+
+    print(f"\n📈 Total campañas creadas: {campanas_creadas}")
+    
+    # Estadísticas finales
+    total_campanas = Campaign.objects.count()
+    campanas_activas = Campaign.objects.filter(estado='EN_CURSO').count()
+    campanas_planificadas = Campaign.objects.filter(estado='PLANIFICADA').count()
+    campanas_finalizadas = Campaign.objects.filter(estado='FINALIZADA').count()
+    total_asignaciones_socios = CampaignPartner.objects.count()
+    total_asignaciones_parcelas = CampaignPlot.objects.count()
+    
+    print("\n✅ Población de CU9 (Campañas) completada!")
+    print(f"📊 Resumen de Campañas:")
+    print(f"   Total campañas: {total_campanas}")
+    print(f"   🟢 En curso: {campanas_activas}")
+    print(f"   🔵 Planificadas: {campanas_planificadas}")
+    print(f"   ⚫ Finalizadas: {campanas_finalizadas}")
+    print(f"   👥 Socios asignados: {total_asignaciones_socios}")
+    print(f"   🌱 Parcelas asignadas: {total_asignaciones_parcelas}")
+    
+    # Mostrar detalle de cada campaña
+    print("\n📋 Detalle de Campañas:")
+    for campana in Campaign.objects.all():
+        socios_count = campana.socios_asignados.count()
+        parcelas_count = campana.parcelas.count()
+        print(f"\n   🌾 {campana.nombre}")
+        print(f"      Estado: {campana.get_estado_display()}")
+        print(f"      Duración: {campana.duracion_dias()} días")
+        print(f"      Progreso: {campana.progreso_temporal():.1f}%")
+        print(f"      Meta: {campana.meta_produccion} {campana.unidad_meta}")
+        print(f"      Presupuesto: Bs. {campana.presupuesto:,.2f}")
+        print(f"      Socios: {socios_count} | Parcelas: {parcelas_count}")
+        print(f"      Responsable: {campana.responsable.get_full_name()}")
+
+
+def poblar_ciclos_cultivo_y_tratamientos():
+    """Poblar ciclos de cultivo y tratamientos (labores) para reportes"""
+    print("\n🌱 Poblando ciclos de cultivo y tratamientos (labores agrícolas)...")
+    
+    # Obtener cultivos existentes
+    cultivos = list(Cultivo.objects.all())
+    if not cultivos:
+        print("⚠️ No hay cultivos disponibles. Ejecuta primero crear_datos_prueba()")
+        return
+    
+    # Obtener parcelas
+    parcelas = list(Parcela.objects.all())
+    
+    # Obtener pesticidas y fertilizantes
+    pesticidas = list(Pesticida.objects.all()[:5])
+    fertilizantes = list(Fertilizante.objects.all()[:5])
+    
+    if not pesticidas or not fertilizantes:
+        print("⚠️ No hay insumos disponibles. Ejecuta primero poblar_datos_cu7_cu8()")
+        return
+    
+    # Obtener campañas
+    campanas = Campaign.objects.filter(estado__in=['EN_CURSO', 'FINALIZADA'])
+    
+    if not campanas:
+        print("⚠️ No hay campañas activas o finalizadas")
+        return
+    
+    ciclos_creados = 0
+    tratamientos_creados = 0
+    
+    hoy = datetime.now().date()
+    
+    # Crear ciclos basados en las campañas y sus parcelas asignadas
+    for campana in campanas:
+        # Obtener parcelas asignadas a esta campaña
+        parcelas_campana = CampaignPlot.objects.filter(campaign=campana).select_related('parcela')
+        
+        for cp in parcelas_campana:
+            parcela = cp.parcela
+            
+            # Obtener cultivos de esta parcela
+            cultivos_parcela = Cultivo.objects.filter(parcela=parcela)
+            
+            if not cultivos_parcela.exists():
+                continue
+            
+            # Tomar el primer cultivo de la parcela (o crear lógica más compleja)
+            cultivo = cultivos_parcela.first()
+            
+            # Crear ciclo para esta campaña (permitir múltiples ciclos por cultivo)
+            # Un cultivo puede tener varios ciclos en diferentes campañas/temporadas
+            
+            # Fechas basadas en la campaña
+            fecha_inicio = campana.fecha_inicio + timedelta(days=random.randint(5, 20))
+            duracion_dias = random.randint(90, 150)
+            fecha_estimada_fin = fecha_inicio + timedelta(days=duracion_dias)
+            
+            # Asegurar que no exceda la fecha fin de la campaña
+            if fecha_estimada_fin > campana.fecha_fin:
+                fecha_estimada_fin = campana.fecha_fin - timedelta(days=random.randint(5, 15))
+            
+            # Estado según las fechas y estado de campaña
+            if campana.estado == 'FINALIZADA':
+                estado = 'FINALIZADO'
+                fecha_fin_real = fecha_estimada_fin + timedelta(days=random.randint(-5, 5))
+            elif fecha_inicio > hoy:
+                estado = 'PLANIFICADO'
+                fecha_fin_real = None
+            elif fecha_estimada_fin < hoy:
+                estado = 'FINALIZADO'
+                fecha_fin_real = fecha_estimada_fin + timedelta(days=random.randint(-5, 5))
+            else:
+                # Campaña en curso y ciclo en progreso
+                estado = random.choice(['CRECIMIENTO', 'COSECHA'])
+                fecha_fin_real = None
+            
+            ciclo = CicloCultivo.objects.create(
+                cultivo=cultivo,
+                fecha_inicio=fecha_inicio,
+                fecha_estimada_fin=fecha_estimada_fin,
+                fecha_fin_real=fecha_fin_real,
+                estado=estado,
+                costo_estimado=Decimal(str(random.uniform(5000, 15000))),
+                costo_real=Decimal(str(random.uniform(4500, 16000))) if estado == 'FINALIZADO' else None,
+                rendimiento_esperado=Decimal(str(random.uniform(2000, 5000))),
+                rendimiento_real=Decimal(str(random.uniform(1800, 5500))) if estado == 'FINALIZADO' else None,
+                unidad_rendimiento='kg/ha',
+                observaciones=f'Ciclo de {cultivo.especie} en parcela {cultivo.parcela.nombre} - Campaña: {campana.nombre}'
+            )
+            ciclos_creados += 1
+            print(f"✓ Ciclo de cultivo creado: {ciclo} [{estado}]")
+            
+            # Crear tratamientos para este ciclo
+            num_tratamientos = random.randint(5, 12)
+            
+            for j in range(num_tratamientos):
+                # Fecha de aplicación dentro del ciclo
+                dias_desde_inicio = random.randint(5, duracion_dias - 5)
+                fecha_aplicacion = fecha_inicio + timedelta(days=dias_desde_inicio)
+                
+                # Tipo de tratamiento
+                tipo = random.choice(['FERTILIZANTE', 'PESTICIDA', 'HERBICIDA', 'RIEGO', 'LABOR'])
+                
+                if tipo == 'FERTILIZANTE':
+                    fertilizante = random.choice(fertilizantes)
+                    nombre_producto = fertilizante.nombre_comercial
+                    dosis = Decimal(str(random.uniform(100, 300)))
+                    unidad_dosis = 'kg/ha'
+                    costo = float(dosis) * float(fertilizante.precio_unitario) * float(cultivo.hectareas_sembradas or 1)
+                    
+                elif tipo == 'PESTICIDA' or tipo == 'HERBICIDA':
+                    pesticida = random.choice(pesticidas)
+                    nombre_producto = pesticida.nombre_comercial
+                    dosis = Decimal(str(random.uniform(0.5, 3.0)))
+                    unidad_dosis = 'L/ha'
+                    costo = float(dosis) * float(pesticida.precio_unitario) * float(cultivo.hectareas_sembradas or 1)
+                    
+                elif tipo == 'RIEGO':
+                    nombre_producto = 'Riego por aspersión'
+                    dosis = Decimal(str(random.uniform(20, 50)))
+                    unidad_dosis = 'm³/ha'
+                    costo = float(dosis) * 2.5 * float(cultivo.hectareas_sembradas or 1)
+                    
+                else:  # LABOR
+                    labores = ['Deshierbe manual', 'Aporque', 'Poda', 'Raleo', 'Control manual de plagas']
+                    nombre_producto = random.choice(labores)
+                    dosis = Decimal('1.0')
+                    unidad_dosis = 'jornales/ha'
+                    costo = 150.0 * float(cultivo.hectareas_sembradas or 1)  # 150 Bs por jornal
+                
+                aplicadores = [
+                    'Juan Pérez', 'María López', 'Carlos Mamani', 
+                    'Ana Quispe', 'Pedro Condori', 'Equipo técnico'
+                ]
+                
+                tratamiento = Tratamiento.objects.create(
+                    ciclo_cultivo=ciclo,
+                    tipo_tratamiento=tipo,
+                    nombre_producto=nombre_producto,
+                    dosis=dosis,
+                    unidad_dosis=unidad_dosis,
+                    fecha_aplicacion=fecha_aplicacion,
+                    costo=Decimal(str(round(costo, 2))),
+                    aplicado_por=random.choice(aplicadores),
+                    observaciones=f'Aplicación de {tipo.lower()} en etapa de {estado.lower()}'
+                )
+                tratamientos_creados += 1
+    
+    print(f"\n✅ Ciclos de cultivo y tratamientos poblados!")
+    print(f"📊 Resumen:")
+    print(f"   Ciclos de cultivo creados: {ciclos_creados}")
+    print(f"   Tratamientos creados: {tratamientos_creados}")
+    print(f"   Total ciclos: {CicloCultivo.objects.count()}")
+    print(f"   Total tratamientos: {Tratamiento.objects.count()}")
+    
+    # Mostrar estadísticas por tipo de tratamiento
+    print("\n📋 Tratamientos por tipo:")
+    for tipo, nombre in Tratamiento.TIPOS_TRATAMIENTO:
+        count = Tratamiento.objects.filter(tipo_tratamiento=tipo).count()
+        if count > 0:
+            print(f"   {nombre}: {count}")
+
+
+def poblar_cosechas():
+    """Poblar cosechas para reportes de producción"""
+    print("\n🌾 Poblando cosechas (producción agrícola)...")
+    
+    from cooperativa.models import Cosecha
+    
+    cosechas_creadas = 0
+    
+    # Obtener ciclos finalizados o en crecimiento/cosecha (estados donde se puede cosechar)
+    ciclos = CicloCultivo.objects.filter(
+        estado__in=['FINALIZADO', 'CRECIMIENTO', 'COSECHA']
+    ).select_related('cultivo__parcela')
+    
+    print(f"   Encontrados {ciclos.count()} ciclos para cosechar")
+    
+    calidades = ['EXCELENTE', 'BUENA', 'REGULAR', 'MALA']
+    
+    for ciclo in ciclos:
+        # Verificar si ya tiene cosechas
+        if Cosecha.objects.filter(ciclo_cultivo=ciclo).exists():
+            continue
+            
+        parcela = ciclo.cultivo.parcela
+        cultivo_especie = ciclo.cultivo.especie
+        
+        # Determinar cuántas cosechas hacer (1-3 cosechas por ciclo)
+        num_cosechas = random.randint(1, 3)
+        
+        # Calcular producción base según la especie y superficie
+        superficie = float(parcela.superficie_hectareas)
+        
+        # Rendimientos típicos por hectárea (kg/ha)
+        rendimientos = {
+            'Maíz': random.uniform(2500, 4000),
+            'Papa': random.uniform(8000, 15000),
+            'Quinoa': random.uniform(800, 1500),
+            'Trigo': random.uniform(1500, 3000),
+            'Hortalizas': random.uniform(5000, 10000),
+        }
+        
+        # Buscar rendimiento base
+        rendimiento_base = 2000  # Default
+        for especie, rendimiento in rendimientos.items():
+            if especie.lower() in cultivo_especie.lower():
+                rendimiento_base = rendimiento
+                break
+        
+        # Producción total del ciclo
+        produccion_total_ciclo = superficie * rendimiento_base
+        
+        # Dividir entre las cosechas
+        fecha_inicio_cosecha = ciclo.fecha_estimada_fin - timedelta(days=30)
+        
+        for i in range(num_cosechas):
+            # Distribuir producción (cosechas más grandes al inicio)
+            porcentaje = random.uniform(0.25, 0.45) if i == 0 else random.uniform(0.15, 0.35)
+            cantidad = produccion_total_ciclo * porcentaje
+            
+            # Fecha de cosecha
+            dias_offset = i * 7  # Cada 7 días una cosecha
+            fecha_cosecha = fecha_inicio_cosecha + timedelta(days=dias_offset)
+            
+            # Asegurar que no sea fecha futura
+            if fecha_cosecha > date.today():
+                fecha_cosecha = date.today() - timedelta(days=random.randint(1, 15))
+            
+            # Calidad (mejores al inicio)
+            if i == 0:
+                calidad = random.choice(['EXCELENTE', 'BUENA'])
+            else:
+                calidad = random.choice(calidades)
+            
+            # Precio de venta según calidad
+            precios_base = {
+                'Maíz': 2.5,
+                'Papa': 1.8,
+                'Quinoa': 12.0,
+                'Trigo': 2.0,
+                'Hortalizas': 3.5,
+            }
+            
+            precio_base = 2.0  # Default
+            for especie, precio in precios_base.items():
+                if especie.lower() in cultivo_especie.lower():
+                    precio_base = precio
+                    break
+            
+            # Ajustar precio por calidad
+            multiplicadores_calidad = {
+                'EXCELENTE': 1.3,
+                'BUENA': 1.0,
+                'REGULAR': 0.8,
+                'MALA': 0.5
+            }
+            precio_venta = precio_base * multiplicadores_calidad[calidad]
+            
+            # Crear cosecha
+            cosecha = Cosecha.objects.create(
+                ciclo_cultivo=ciclo,
+                fecha_cosecha=fecha_cosecha,
+                cantidad_cosechada=Decimal(str(round(cantidad, 2))),
+                unidad_medida='kg',
+                calidad=calidad,
+                estado='COMPLETADA',
+                precio_venta=Decimal(str(round(precio_venta, 2))),
+                observaciones=f'Cosecha {i+1} de {num_cosechas} - Calidad {calidad.lower()}'
+            )
+            cosechas_creadas += 1
+            
+            print(f"  ✓ Cosecha creada: {ciclo.cultivo.especie} - {cantidad:.2f} kg - {calidad}")
+    
+    print(f"\n✅ Cosechas pobladas!")
+    print(f"📊 Resumen:")
+    print(f"   Cosechas creadas: {cosechas_creadas}")
+    print(f"   Total cosechas: {Cosecha.objects.count()}")
+    print(f"   Producción total: {Cosecha.objects.aggregate(total=Sum('cantidad_cosechada'))['total'] or 0:.2f} kg")
+    
+    # Estadísticas por calidad
+    print("\n📋 Cosechas por calidad:")
+    for calidad in ['EXCELENTE', 'BUENA', 'REGULAR', 'MALA']:
+        count = Cosecha.objects.filter(calidad=calidad).count()
+        if count > 0:
+            cantidad_total = Cosecha.objects.filter(calidad=calidad).aggregate(
+                total=Sum('cantidad_cosechada')
+            )['total'] or 0
+            print(f"   {calidad}: {count} cosechas ({cantidad_total:.2f} kg)")
+
+
 if __name__ == '__main__':
+    # LIMPIAR TODO PRIMERO
+    limpiar_base_datos()
+    
+    # RECREAR TODO DESDE CERO
     crear_datos_prueba()
     poblar_datos_cu7_cu8()
+    poblar_datos_campanas()
+    poblar_ciclos_cultivo_y_tratamientos()
+    poblar_cosechas()
