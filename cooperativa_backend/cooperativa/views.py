@@ -19,7 +19,7 @@ from .models import (
     Rol, Usuario, UsuarioRol, Comunidad, Socio,
     Parcela, Cultivo, BitacoraAuditoria,
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
-    Semilla, Pesticida, Fertilizante
+    Semilla, Pesticida, Fertilizante, Labor, ProductoCosechado
 )
 from .models import Campaign, CampaignPartner, CampaignPlot
 from .serializers import (
@@ -29,7 +29,8 @@ from .serializers import (
     BitacoraAuditoriaSerializer, CicloCultivoSerializer,
     CosechaSerializer, TratamientoSerializer, AnalisisSueloSerializer,
     TransferenciaParcelaSerializer, SemillaSerializer, PesticidaSerializer, FertilizanteSerializer,
-    CampaignSerializer, CampaignListSerializer
+    CampaignSerializer, CampaignListSerializer, LaborSerializer, LaborListSerializer, LaborCreateSerializer, LaborUpdateSerializer, ProductoCosechadoSerializer, ProductoCosechadoListSerializer,
+    ProductoCosechadoCambiarEstadoSerializer, ProductoCosechadoCreateSerializer, ProductoCosechadoUpdateSerializer, ProductoCosechadoVenderSerializer
 )
 from .reports import CampaignReports
 
@@ -3999,3 +4000,1220 @@ def report_production_by_plot(request):
         return Response(report_data, status=status.HTTP_404_NOT_FOUND)
 
     return Response(report_data)
+
+
+# ============================================================================
+# CU10: GESTIÓN DE LABORES AGRÍCOLAS - VIEWSETS Y VISTAS
+# T047: Gestión de labores (registrar, editar, eliminar)
+# T048: Descuento de insumos del inventario (coordinado con CU12)
+# T049: Validación de fechas dentro de campaña
+# ============================================================================
+
+class LaborPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class LaborViewSet(viewsets.ModelViewSet):
+    """
+    CU10: ViewSet para gestión completa de labores agrícolas
+    T047: CRUD completo (list, create, retrieve, update, destroy)
+    T048: Descuento automático de insumos cuando la labor se completa
+    T049: Validación de fechas dentro del rango de campaña
+    """
+    queryset = Labor.objects.all().select_related(
+        'campaña', 'parcela__socio__usuario', 'insumo', 'responsable'
+    )
+    permission_classes = [IsAuthenticated]
+    filter_backends = [OrderingFilter]
+    ordering_fields = ['fecha_labor', 'labor', 'estado', 'creado_en']
+    ordering = ['-fecha_labor', '-creado_en']
+    pagination_class = LaborPagination
+
+    def get_serializer_class(self):
+        """Usar serializer específico según la acción"""
+        if self.action == 'create':
+            return LaborCreateSerializer
+        elif self.action == 'update' or self.action == 'partial_update':
+            return LaborUpdateSerializer
+        elif self.action == 'list':
+            return LaborListSerializer
+        return LaborSerializer
+
+    def get_queryset(self):
+        """Filtros opcionales por query params"""
+        queryset = super().get_queryset()
+        
+        # Filtros
+        fecha_labor_desde = self.request.query_params.get('fecha_labor_desde')
+        fecha_labor_hasta = self.request.query_params.get('fecha_labor_hasta')
+        labor_tipo = self.request.query_params.get('labor_tipo')
+        estado = self.request.query_params.get('estado')
+        campaña_id = self.request.query_params.get('campaña_id')
+        parcela_id = self.request.query_params.get('parcela_id')
+        socio_id = self.request.query_params.get('socio_id')
+        insumo_id = self.request.query_params.get('insumo_id')
+        responsable_id = self.request.query_params.get('responsable_id')
+
+        if fecha_labor_desde:
+            queryset = queryset.filter(fecha_labor__gte=fecha_labor_desde)
+        if fecha_labor_hasta:
+            queryset = queryset.filter(fecha_labor__lte=fecha_labor_hasta)
+        if labor_tipo:
+            queryset = queryset.filter(labor=labor_tipo)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if campaña_id:
+            queryset = queryset.filter(campaña_id=campaña_id)
+        if parcela_id:
+            queryset = queryset.filter(parcela_id=parcela_id)
+        if socio_id:
+            queryset = queryset.filter(parcela__socio_id=socio_id)
+        if insumo_id:
+            queryset = queryset.filter(insumo_id=insumo_id)
+        if responsable_id:
+            queryset = queryset.filter(responsable_id=responsable_id)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        """Registrar creación en bitácora y manejar descuento de insumos si es necesario"""
+        labor = serializer.save()
+        
+        # Si la labor se crea como COMPLETADA y usa insumos, descontar del inventario
+        if labor.estado == 'COMPLETADA' and labor.insumo and labor.cantidad_insumo:
+            labor._descontar_insumo()
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR',
+            tabla_afectada='labor',
+            registro_id=labor.id,
+            detalles={
+                'labor_tipo': labor.labor,
+                'fecha_labor': labor.fecha_labor.isoformat(),
+                'campaña': labor.campaña.nombre if labor.campaña else None,
+                'parcela': labor.parcela.nombre if labor.parcela else None,
+                'creado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        """Registrar actualización en bitácora y manejar cambios de estado"""
+        labor_anterior = self.get_object()
+        estado_anterior = labor_anterior.estado
+        insumo_anterior = labor_anterior.insumo
+        cantidad_anterior = labor_anterior.cantidad_insumo
+
+        labor = serializer.save()
+
+        # Si cambia de estado a COMPLETADA y usa insumos, descontar del inventario
+        if (estado_anterior != 'COMPLETADA' and labor.estado == 'COMPLETADA' and 
+            labor.insumo and labor.cantidad_insumo):
+            labor._descontar_insumo()
+
+        # Si cambia el insumo o la cantidad y ya estaba completada, ajustar inventario
+        if (estado_anterior == 'COMPLETADA' and labor.estado == 'COMPLETADA' and
+            (insumo_anterior != labor.insumo or cantidad_anterior != labor.cantidad_insumo)):
+            
+            # Revertir descuento anterior si había insumo
+            if insumo_anterior and cantidad_anterior:
+                insumo_anterior.cantidad_disponible += cantidad_anterior
+                insumo_anterior.save()
+            
+            # Aplicar nuevo descuento si hay nuevo insumo
+            if labor.insumo and labor.cantidad_insumo:
+                labor._descontar_insumo()
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR',
+            tabla_afectada='labor',
+            registro_id=labor.id,
+            detalles={
+                'labor_tipo': labor.labor,
+                'fecha_labor': labor.fecha_labor.isoformat(),
+                'estado_anterior': estado_anterior,
+                'estado_nuevo': labor.estado,
+                'actualizado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_destroy(self, instance):
+        """Registrar eliminación en bitácora y revertir descuento de insumos si es necesario"""
+        # Si la labor estaba completada y usaba insumos, revertir el descuento
+        if instance.estado == 'COMPLETADA' and instance.insumo and instance.cantidad_insumo:
+            instance.insumo.cantidad_disponible += instance.cantidad_insumo
+            instance.insumo.save()
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ELIMINAR',
+            tabla_afectada='labor',
+            registro_id=instance.id,
+            detalles={
+                'labor_tipo': instance.labor,
+                'fecha_labor': instance.fecha_labor.isoformat(),
+                'eliminado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def cambiar_estado(self, request, pk=None):
+        """
+        CU10: Cambiar estado de una labor específica
+        POST /api/labores/{id}/cambiar_estado/
+        """
+        labor = self.get_object()
+        nuevo_estado = request.data.get('estado')
+        observaciones = request.data.get('observaciones', '')
+
+        if not nuevo_estado:
+            return Response({
+                'error': 'estado es requerido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if nuevo_estado not in dict(Labor.ESTADOS):
+            return Response({
+                'error': f'Estado inválido. Estados válidos: {", ".join(dict(Labor.ESTADOS).keys())}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        estado_anterior = labor.estado
+        labor.estado = nuevo_estado
+        
+        if observaciones:
+            labor.observaciones = observaciones
+
+        # Si cambia a COMPLETADA y usa insumos, descontar del inventario
+        if (estado_anterior != 'COMPLETADA' and nuevo_estado == 'COMPLETADA' and 
+            labor.insumo and labor.cantidad_insumo):
+            labor._descontar_insumo()
+
+        labor.save()
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='ACTUALIZAR',
+            tabla_afectada='labor',
+            registro_id=labor.id,
+            detalles={
+                'labor_tipo': labor.labor,
+                'cambio_estado': True,
+                'estado_anterior': estado_anterior,
+                'estado_nuevo': nuevo_estado,
+                'observaciones': observaciones,
+                'modificado_por': request.user.usuario
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        serializer = self.get_serializer(labor)
+        return Response({
+            'mensaje': f'Estado cambiado de {estado_anterior} a {nuevo_estado}',
+            'labor': serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def actualizar_insumo(self, request, pk=None):
+        """
+        CU10: Actualizar insumo utilizado en la labor
+        POST /api/labores/{id}/actualizar_insumo/
+        """
+        labor = self.get_object()
+        insumo_id = request.data.get('insumo_id')
+        cantidad_insumo = request.data.get('cantidad_insumo')
+
+        # Validaciones
+        if insumo_id is None and cantidad_insumo is None:
+            return Response({
+                'error': 'Debe proporcionar insumo_id o cantidad_insumo'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Guardar estado anterior para reversión si es necesario
+        estado_anterior = labor.estado
+        insumo_anterior = labor.insumo
+        cantidad_anterior = labor.cantidad_insumo
+
+        # Actualizar campos
+        if insumo_id is not None:
+            try:
+                if insumo_id == '':
+                    labor.insumo = None
+                else:
+                    from .models import Insumo  # Asumiendo que el modelo Insumo existe para CU12
+                    labor.insumo = Insumo.objects.get(id=insumo_id)
+            except Insumo.DoesNotExist:
+                return Response({
+                    'error': 'Insumo no encontrado'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+        if cantidad_insumo is not None:
+            if cantidad_insumo < 0:
+                return Response({
+                    'error': 'La cantidad de insumo no puede ser negativa'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            labor.cantidad_insumo = cantidad_insumo
+
+        # Si la labor estaba completada, ajustar inventario
+        if estado_anterior == 'COMPLETADA':
+            # Revertir descuento anterior si había insumo
+            if insumo_anterior and cantidad_anterior:
+                insumo_anterior.cantidad_disponible += cantidad_anterior
+                insumo_anterior.save()
+            
+            # Aplicar nuevo descuento si hay nuevo insumo
+            if labor.insumo and labor.cantidad_insumo:
+                # Validar stock disponible
+                if labor.cantidad_insumo > labor.insumo.cantidad_disponible:
+                    # Revertir cambios si no hay suficiente stock
+                    if insumo_anterior and cantidad_anterior:
+                        insumo_anterior.cantidad_disponible -= cantidad_anterior
+                        insumo_anterior.save()
+                    return Response({
+                        'error': f'Stock insuficiente. Disponible: {labor.insumo.cantidad_disponible}'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                labor._descontar_insumo()
+
+        labor.save()
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='ACTUALIZAR',
+            tabla_afectada='labor',
+            registro_id=labor.id,
+            detalles={
+                'labor_tipo': labor.labor,
+                'cambio_insumo': True,
+                'insumo_anterior': str(insumo_anterior) if insumo_anterior else None,
+                'insumo_nuevo': str(labor.insumo) if labor.insumo else None,
+                'cantidad_anterior': float(cantidad_anterior) if cantidad_anterior else None,
+                'cantidad_nueva': float(labor.cantidad_insumo) if labor.cantidad_insumo else None,
+                'modificado_por': request.user.usuario
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        serializer = self.get_serializer(labor)
+        return Response({
+            'mensaje': 'Insumo actualizado exitosamente',
+            'labor': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def tipos_labor(self, request):
+        """
+        CU10: Obtener lista de tipos de labor disponibles
+        GET /api/labores/tipos_labor/
+        """
+        tipos = [
+            {'valor': tipo[0], 'etiqueta': tipo[1]} 
+            for tipo in Labor.TIPOS_LABOR
+        ]
+        return Response(tipos)
+
+    @action(detail=False, methods=['get'])
+    def estados_labor(self, request):
+        """
+        CU10: Obtener lista de estados disponibles para labores
+        GET /api/labores/estados_labor/
+        """
+        estados = [
+            {'valor': estado[0], 'etiqueta': estado[1]} 
+            for estado in Labor.ESTADOS
+        ]
+        return Response(estados)
+
+    @action(detail=False, methods=['get'])
+    def labores_con_insumos(self, request):
+        """
+        CU10: Obtener labores que pueden descontar insumos
+        GET /api/labores/labores_con_insumos/
+        """
+        labores_con_insumos = ['FERTILIZACION', 'FUMIGACION', 'SIEMBRA']
+        tipos = [
+            {'valor': tipo[0], 'etiqueta': tipo[1]} 
+            for tipo in Labor.TIPOS_LABOR 
+            if tipo[0] in labores_con_insumos
+        ]
+        return Response({
+            'labores_con_insumos': labores_con_insumos,
+            'tipos': tipos
+        })
+
+    @action(detail=False, methods=['get'])
+    def reporte_labores_por_periodo(self, request):
+        """
+        CU10: Reporte de labores por período
+        GET /api/labores/reporte_labores_por_periodo/?fecha_desde=YYYY-MM-DD&fecha_hasta=YYYY-MM-DD
+        """
+        from django.db.models import Count, Sum, Avg
+        from datetime import datetime
+
+        fecha_desde = request.query_params.get('fecha_desde')
+        fecha_hasta = request.query_params.get('fecha_hasta')
+
+        # Validar fechas
+        if not fecha_desde or not fecha_hasta:
+            return Response({
+                'error': 'fecha_desde y fecha_hasta son requeridos'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fecha_desde = datetime.strptime(fecha_desde, '%Y-%m-%d').date()
+            fecha_hasta = datetime.strptime(fecha_hasta, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({
+                'error': 'Formato de fecha inválido. Use YYYY-MM-DD'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Filtrar labores por período
+        labores = Labor.objects.filter(
+            fecha_labor__range=[fecha_desde, fecha_hasta]
+        )
+
+        # Estadísticas generales
+        total_labores = labores.count()
+        labores_completadas = labores.filter(estado='COMPLETADA').count()
+        labores_planificadas = labores.filter(estado='PLANIFICADA').count()
+        labores_en_proceso = labores.filter(estado='EN_PROCESO').count()
+        labores_canceladas = labores.filter(estado='CANCELADA').count()
+
+        # Labores por tipo
+        labores_por_tipo = labores.values('labor').annotate(
+            count=Count('id'),
+            completadas=Count('id', filter=Q(estado='COMPLETADA')),
+            costo_promedio=Avg('costo_estimado'),
+            duracion_promedio=Avg('duracion_horas')
+        ).order_by('-count')
+
+        # Labores que usaron insumos
+        labores_con_insumos = labores.filter(insumo__isnull=False).count()
+        costo_total_insumos = labores.filter(
+            insumo__isnull=False, 
+            estado='COMPLETADA'
+        ).aggregate(
+            total=Sum(F('cantidad_insumo') * F('insumo__precio_unitario'))
+        )['total'] or 0
+
+        # Costo total estimado
+        costo_total_estimado = labores.aggregate(
+            total=Sum('costo_estimado')
+        )['total'] or 0
+
+        # Labores por campaña
+        labores_por_campaña = labores.filter(campaña__isnull=False).values(
+            'campaña__nombre'
+        ).annotate(
+            count=Count('id'),
+            completadas=Count('id', filter=Q(estado='COMPLETADA'))
+        ).order_by('-count')
+
+        # Labores por parcela
+        labores_por_parcela = labores.filter(parcela__isnull=False).values(
+            'parcela__nombre'
+        ).annotate(
+            count=Count('id'),
+            completadas=Count('id', filter=Q(estado='COMPLETADA'))
+        ).order_by('-count')[:10]  # Top 10 parcelas
+
+        return Response({
+            'periodo': {
+                'fecha_desde': fecha_desde.isoformat(),
+                'fecha_hasta': fecha_hasta.isoformat(),
+                'dias': (fecha_hasta - fecha_desde).days
+            },
+            'estadisticas_generales': {
+                'total_labores': total_labores,
+                'labores_completadas': labores_completadas,
+                'labores_planificadas': labores_planificadas,
+                'labores_en_proceso': labores_en_proceso,
+                'labores_canceladas': labores_canceladas,
+                'tasa_completitud': round((labores_completadas / total_labores * 100), 2) if total_labores > 0 else 0
+            },
+            'costos': {
+                'costo_total_estimado': float(costo_total_estimado),
+                'costo_total_insumos': float(costo_total_insumos),
+                'costo_total': float(costo_total_estimado + costo_total_insumos),
+                'labores_con_insumos': labores_con_insumos
+            },
+            'labores_por_tipo': list(labores_por_tipo),
+            'labores_por_campaña': list(labores_por_campaña),
+            'labores_por_parcela': list(labores_por_parcela)
+        })
+
+    @action(detail=False, methods=['get'])
+    def validar_fecha_campaña(self, request):
+        """
+        CU10: Validar si una fecha está dentro del rango de una campaña
+        GET /api/labores/validar_fecha_campaña/?campaña_id=X&fecha=YYYY-MM-DD
+        """
+        campaña_id = request.query_params.get('campaña_id')
+        fecha_str = request.query_params.get('fecha')
+
+        if not campaña_id or not fecha_str:
+            return Response({
+                'error': 'campaña_id y fecha son requeridos'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from datetime import datetime
+            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            campaña = Campaign.objects.get(id=campaña_id)
+        except Campaign.DoesNotExist:
+            return Response({
+                'error': 'Campaña no encontrada'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response({
+                'error': 'Formato de fecha inválido. Use YYYY-MM-DD'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validar fecha
+        valida = True
+        errores = []
+
+        if fecha < campaña.fecha_inicio:
+            valida = False
+            errores.append(f'La fecha no puede ser anterior al inicio de la campaña ({campaña.fecha_inicio})')
+
+        if campaña.fecha_fin and fecha > campaña.fecha_fin:
+            valida = False
+            errores.append(f'La fecha no puede ser posterior al fin de la campaña ({campaña.fecha_fin})')
+
+        return Response({
+            'valida': valida,
+            'fecha': fecha.isoformat(),
+            'campaña': campaña.nombre,
+            'rango_campaña': {
+                'fecha_inicio': campaña.fecha_inicio.isoformat(),
+                'fecha_fin': campaña.fecha_fin.isoformat() if campaña.fecha_fin else None
+            },
+            'errores': errores
+        })
+
+
+# Endpoints adicionales para CU10
+# ================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def crear_labor_rapida(request):
+    """
+    CU10: Crear labor rápida (sin campos opcionales)
+    POST /api/labores/crear_rapida/
+    """
+    serializer = LaborCreateSerializer(data=request.data, context={'request': request})
+    
+    if serializer.is_valid():
+        labor = serializer.save()
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='CREAR',
+            tabla_afectada='labor',
+            registro_id=labor.id,
+            detalles={
+                'labor_tipo': labor.labor,
+                'fecha_labor': labor.fecha_labor.isoformat(),
+                'creado_por': request.user.usuario,
+                'tipo_creacion': 'rapida'
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        response_serializer = LaborSerializer(labor)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+    
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def buscar_labores_avanzado(request):
+    """
+    CU10: Búsqueda avanzada de labores
+    GET /api/labores/buscar_avanzado/?param1=valor1&param2=valor2...
+    """
+    queryset = Labor.objects.select_related(
+        'campaña', 'parcela__socio__usuario', 'insumo', 'responsable'
+    )
+
+    # Filtros de búsqueda
+    fecha_labor_desde = request.query_params.get('fecha_labor_desde')
+    fecha_labor_hasta = request.query_params.get('fecha_labor_hasta')
+    labor_tipo = request.query_params.get('labor_tipo')
+    estado = request.query_params.get('estado')
+    campaña_id = request.query_params.get('campaña_id')
+    parcela_id = request.query_params.get('parcela_id')
+    socio_id = request.query_params.get('socio_id')
+    insumo_id = request.query_params.get('insumo_id')
+    responsable_id = request.query_params.get('responsable_id')
+    con_insumos = request.query_params.get('con_insumos')
+    sin_insumos = request.query_params.get('sin_insumos')
+
+    # Aplicar filtros
+    if fecha_labor_desde:
+        queryset = queryset.filter(fecha_labor__gte=fecha_labor_desde)
+    if fecha_labor_hasta:
+        queryset = queryset.filter(fecha_labor__lte=fecha_labor_hasta)
+    if labor_tipo:
+        queryset = queryset.filter(labor=labor_tipo)
+    if estado:
+        queryset = queryset.filter(estado=estado)
+    if campaña_id:
+        queryset = queryset.filter(campaña_id=campaña_id)
+    if parcela_id:
+        queryset = queryset.filter(parcela_id=parcela_id)
+    if socio_id:
+        queryset = queryset.filter(parcela__socio_id=socio_id)
+    if insumo_id:
+        queryset = queryset.filter(insumo_id=insumo_id)
+    if responsable_id:
+        queryset = queryset.filter(responsable_id=responsable_id)
+    if con_insumos:
+        queryset = queryset.filter(insumo__isnull=False)
+    if sin_insumos:
+        queryset = queryset.filter(insumo__isnull=True)
+
+    # Paginación
+    page = int(request.query_params.get('page', 1))
+    page_size = int(request.query_params.get('page_size', 20))
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    total_count = queryset.count()
+    labores = queryset[start:end]
+
+    serializer = LaborListSerializer(labores, many=True)
+
+    return Response({
+        'count': total_count,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': (total_count + page_size - 1) // page_size,
+        'filtros_aplicados': {
+            'fecha_labor_desde': fecha_labor_desde,
+            'fecha_labor_hasta': fecha_labor_hasta,
+            'labor_tipo': labor_tipo,
+            'estado': estado,
+            'campaña_id': campaña_id,
+            'parcela_id': parcela_id,
+            'socio_id': socio_id,
+            'insumo_id': insumo_id,
+            'responsable_id': responsable_id,
+            'con_insumos': con_insumos,
+            'sin_insumos': sin_insumos
+        },
+        'results': serializer.data
+    })
+
+# ============================================================================
+# CU15: GESTIÓN DE PRODUCTOS COSECHADOS - VIEWSETS Y VISTAS
+# Registrar productos cosechados por campaña y parcela
+# ============================================================================
+
+class ProductoCosechadoPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class ProductoCosechadoViewSet(viewsets.ModelViewSet):
+    """
+    CU15: ViewSet para gestión completa de productos cosechados
+    CRUD completo (list, create, retrieve, update, destroy)
+    """
+    queryset = ProductoCosechado.objects.all().select_related(
+        'cultivo', 'labor', 'campania', 'parcela__socio__usuario'
+    )
+    permission_classes = [IsAuthenticated]
+    filter_backends = [OrderingFilter]
+    ordering_fields = ['fecha_cosecha', 'cantidad', 'estado', 'lote', 'creado_en']
+    ordering = ['-fecha_cosecha', '-creado_en']
+    pagination_class = ProductoCosechadoPagination
+
+    def get_serializer_class(self):
+        """Usar serializer específico según la acción"""
+        if self.action == 'create':
+            return ProductoCosechadoCreateSerializer
+        elif self.action == 'update' or self.action == 'partial_update':
+            return ProductoCosechadoUpdateSerializer
+        elif self.action == 'list':
+            return ProductoCosechadoListSerializer
+        return ProductoCosechadoSerializer
+
+    def get_queryset(self):
+        """Filtros opcionales por query params"""
+        queryset = super().get_queryset()
+        
+        # Filtros
+        fecha_cosecha_desde = self.request.query_params.get('fecha_cosecha_desde')
+        fecha_cosecha_hasta = self.request.query_params.get('fecha_cosecha_hasta')
+        cultivo_id = self.request.query_params.get('cultivo_id')
+        campania_id = self.request.query_params.get('campania_id')
+        parcela_id = self.request.query_params.get('parcela_id')
+        estado = self.request.query_params.get('estado')
+        lote = self.request.query_params.get('lote')
+        calidad = self.request.query_params.get('calidad')
+        labor_id = self.request.query_params.get('labor_id')
+        socio_id = self.request.query_params.get('socio_id')
+
+        if fecha_cosecha_desde:
+            queryset = queryset.filter(fecha_cosecha__gte=fecha_cosecha_desde)
+        if fecha_cosecha_hasta:
+            queryset = queryset.filter(fecha_cosecha__lte=fecha_cosecha_hasta)
+        if cultivo_id:
+            queryset = queryset.filter(cultivo_id=cultivo_id)
+        if campania_id:
+            queryset = queryset.filter(campania_id=campania_id)
+        if parcela_id:
+            queryset = queryset.filter(parcela_id=parcela_id)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if lote:
+            queryset = queryset.filter(lote=lote)
+        if calidad:
+            queryset = queryset.filter(calidad__icontains=calidad)
+        if labor_id:
+            queryset = queryset.filter(labor_id=labor_id)
+        if socio_id:
+            # Filtrar por socio a través de parcela o campaña
+            queryset = queryset.filter(
+                Q(parcela__socio_id=socio_id) | 
+                Q(campania__socios_asignados__socio_id=socio_id)
+            ).distinct()
+
+        return queryset
+
+    def perform_create(self, serializer):
+        """Registrar creación en bitácora"""
+        producto = serializer.save()
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR',
+            tabla_afectada='producto_cosechado',
+            registro_id=producto.id,
+            detalles={
+                'cultivo': producto.cultivo.especie,
+                'cantidad': float(producto.cantidad),
+                'unidad_medida': producto.unidad_medida,
+                'origen': producto.origen_display,
+                'creado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        """Registrar actualización en bitácora"""
+        producto_anterior = self.get_object()
+        producto = serializer.save()
+
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR',
+            tabla_afectada='producto_cosechado',
+            registro_id=producto.id,
+            detalles={
+                'cultivo': producto.cultivo.especie,
+                'cantidad': float(producto.cantidad),
+                'unidad_medida': producto.unidad_medida,
+                'estado_anterior': producto_anterior.estado,
+                'estado_nuevo': producto.estado,
+                'actualizado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_destroy(self, instance):
+        """Registrar eliminación en bitácora"""
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ELIMINAR',
+            tabla_afectada='producto_cosechado',
+            registro_id=instance.id,
+            detalles={
+                'cultivo': instance.cultivo.especie,
+                'cantidad': float(instance.cantidad),
+                'eliminado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def vender_producto(self, request, pk=None):
+        """
+        CU15: Vender producto cosechado
+        POST /api/productos-cosechados/{id}/vender_producto/
+        """
+        producto = self.get_object()
+        
+        serializer = ProductoCosechadoVenderSerializer(
+            data=request.data,
+            context={'producto': producto}
+        )
+        
+        if serializer.is_valid():
+            producto = serializer.save()
+            
+            # Registrar en bitácora
+            BitacoraAuditoria.objects.create(
+                usuario=request.user,
+                accion='VENDER_PRODUCTO_COSECHADO',
+                tabla_afectada='producto_cosechado',
+                registro_id=producto.id,
+                detalles={
+                    'cultivo': producto.cultivo.especie,
+                    'cantidad_vendida': float(serializer.validated_data['cantidad_vendida']),
+                    'estado_nuevo': producto.estado,
+                    'observaciones': serializer.validated_data.get('observaciones', ''),
+                    'vendido_por': request.user.usuario
+                },
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+
+            response_serializer = ProductoCosechadoSerializer(producto)
+            return Response({
+                'mensaje': 'Producto vendido exitosamente',
+                'producto': response_serializer.data
+            })
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def cambiar_estado(self, request, pk=None):
+        """
+        CU15: Cambiar estado del producto cosechado
+        POST /api/productos-cosechados/{id}/cambiar_estado/
+        """
+        producto = self.get_object()
+        
+        serializer = ProductoCosechadoCambiarEstadoSerializer(
+            data=request.data,
+            context={'producto': producto}
+        )
+        
+        if serializer.is_valid():
+            producto = serializer.save()
+            
+            # Registrar en bitácora
+            BitacoraAuditoria.objects.create(
+                usuario=request.user,
+                accion='CAMBIAR_ESTADO_PRODUCTO_COSECHADO',
+                tabla_afectada='producto_cosechado',
+                registro_id=producto.id,
+                detalles={
+                    'cultivo': producto.cultivo.especie,
+                    'estado_anterior': self.get_object().estado,
+                    'estado_nuevo': serializer.validated_data['nuevo_estado'],
+                    'observaciones': serializer.validated_data.get('observaciones', ''),
+                    'cambiado_por': request.user.usuario
+                },
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+
+            response_serializer = ProductoCosechadoSerializer(producto)
+            return Response({
+                'mensaje': f'Estado cambiado a {serializer.validated_data["nuevo_estado"]}',
+                'producto': response_serializer.data
+            })
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'])
+    def estados_disponibles(self, request):
+        """
+        CU15: Obtener lista de estados disponibles
+        GET /api/productos-cosechados/estados_disponibles/
+        """
+        estados = [
+            {'valor': estado[0], 'etiqueta': estado[1]} 
+            for estado in ProductoCosechado.ESTADO_OPCIONES
+        ]
+        return Response(estados)
+
+    @action(detail=False, methods=['get'])
+    def productos_por_vencer(self, request):
+        """
+        CU15: Obtener productos próximos a vencer (en almacén por mucho tiempo)
+        GET /api/productos-cosechados/productos_por_vencer/?dias_umbral=30
+        """
+        dias_umbral = int(request.query_params.get('dias_umbral', 30))
+        
+        productos = self.get_queryset().filter(estado='En Almacén')
+        productos_por_vencer = [
+            producto for producto in productos 
+            if producto.esta_proximo_vencer(dias_umbral)
+        ]
+        
+        serializer = ProductoCosechadoListSerializer(productos_por_vencer, many=True)
+        return Response({
+            'count': len(productos_por_vencer),
+            'dias_umbral': dias_umbral,
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def productos_vendibles(self, request):
+        """
+        CU15: Obtener productos que pueden ser vendidos
+        GET /api/productos-cosechados/productos_vendibles/
+        """
+        productos_vendibles = self.get_queryset().filter(
+            estado='En Almacén',
+            cantidad__gt=0
+        )
+        
+        serializer = ProductoCosechadoListSerializer(productos_vendibles, many=True)
+        return Response({
+            'count': productos_vendibles.count(),
+            'results': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def reporte_inventario(self, request):
+        """
+        CU15: Reporte general del inventario de productos cosechados
+        GET /api/productos-cosechados/reporte_inventario/
+        """
+        from django.db.models import Sum, Count, Avg
+
+        # Estadísticas generales
+        total_productos = ProductoCosechado.objects.count()
+        productos_almacen = ProductoCosechado.objects.filter(estado='En Almacén').count()
+        productos_vendidos = ProductoCosechado.objects.filter(estado='Vendido').count()
+        productos_procesados = ProductoCosechado.objects.filter(estado='Procesado').count()
+        productos_vencidos = ProductoCosechado.objects.filter(estado='Vencido').count()
+        productos_revision = ProductoCosechado.objects.filter(estado='En revision').count()
+
+        # Cantidad total por estado
+        cantidad_por_estado = ProductoCosechado.objects.values('estado').annotate(
+            total_cantidad=Sum('cantidad'),
+            num_productos=Count('id')
+        ).order_by('-total_cantidad')
+
+        # Productos por cultivo
+        productos_por_cultivo = ProductoCosechado.objects.values(
+            'cultivo__especie', 'cultivo__variedad'
+        ).annotate(
+            total_cantidad=Sum('cantidad'),
+            num_productos=Count('id')
+        ).order_by('-total_cantidad')[:10]
+
+        # Productos por campaña
+        productos_por_campania = ProductoCosechado.objects.filter(
+            campania__isnull=False
+        ).values('campania__nombre').annotate(
+            total_cantidad=Sum('cantidad'),
+            num_productos=Count('id')
+        ).order_by('-total_cantidad')
+
+        # Productos por parcela
+        productos_por_parcela = ProductoCosechado.objects.filter(
+            parcela__isnull=False
+        ).values('parcela__nombre').annotate(
+            total_cantidad=Sum('cantidad'),
+            num_productos=Count('id')
+        ).order_by('-total_cantidad')[:10]
+
+        # Promedio de días en almacén
+        promedio_dias_almacen = ProductoCosechado.objects.filter(
+            estado='En Almacén'
+        ).aggregate(
+            avg_dias=Avg(F('dias_en_almacen'))
+        )['avg_dias'] or 0
+
+        return Response({
+            'resumen': {
+                'total_productos': total_productos,
+                'productos_almacen': productos_almacen,
+                'productos_vendidos': productos_vendidos,
+                'productos_procesados': productos_procesados,
+                'productos_vencidos': productos_vencidos,
+                'productos_revision': productos_revision,
+                'promedio_dias_almacen': round(float(promedio_dias_almacen), 2)
+            },
+            'cantidad_por_estado': list(cantidad_por_estado),
+            'productos_por_cultivo': list(productos_por_cultivo),
+            'productos_por_campania': list(productos_por_campania),
+            'productos_por_parcela': list(productos_por_parcela)
+        })
+
+    @action(detail=False, methods=['get'])
+    def validar_lote(self, request):
+        """
+        CU15: Validar número de lote único
+        GET /api/productos-cosechados/validar_lote/?lote=123.45
+        """
+        lote = request.query_params.get('lote', '').strip()
+        
+        if not lote:
+            return Response({
+                'error': 'lote es requerido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            lote_float = float(lote)
+        except ValueError:
+            return Response({
+                'error': 'lote debe ser un número válido'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Verificar si el lote ya existe
+        existe = ProductoCosechado.objects.filter(lote=lote_float).exists()
+        
+        return Response({
+            'lote': lote_float,
+            'existe': existe,
+            'mensaje': 'Lote ya existe' if existe else 'Lote disponible'
+        })
+
+
+# Endpoints adicionales para CU15
+# ================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def crear_producto_cosechado_rapido(request):
+    """
+    CU15: Crear producto cosechado rápido (sin campos opcionales)
+    POST /api/productos-cosechados/crear_rapido/
+    """
+    serializer = ProductoCosechadoCreateSerializer(data=request.data, context={'request': request})
+    
+    if serializer.is_valid():
+        producto = serializer.save()
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='CREAR',
+            tabla_afectada='producto_cosechado',
+            registro_id=producto.id,
+            detalles={
+                'cultivo': producto.cultivo.especie,
+                'cantidad': float(producto.cantidad),
+                'unidad_medida': producto.unidad_medida,
+                'origen': producto.origen_display,
+                'creado_por': request.user.usuario,
+                'tipo_creacion': 'rapida'
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        response_serializer = ProductoCosechadoSerializer(producto)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+    
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def buscar_productos_cosechados_avanzado(request):
+    """
+    CU15: Búsqueda avanzada de productos cosechados
+    GET /api/productos-cosechados/buscar_avanzado/?param1=valor1&param2=valor2...
+    """
+    queryset = ProductoCosechado.objects.select_related(
+        'cultivo', 'labor', 'campania', 'parcela__socio__usuario'
+    )
+
+    # Filtros de búsqueda
+    fecha_cosecha_desde = request.query_params.get('fecha_cosecha_desde')
+    fecha_cosecha_hasta = request.query_params.get('fecha_cosecha_hasta')
+    cultivo_id = request.query_params.get('cultivo_id')
+    campania_id = request.query_params.get('campania_id')
+    parcela_id = request.query_params.get('parcela_id')
+    estado = request.query_params.get('estado')
+    lote = request.query_params.get('lote')
+    calidad = request.query_params.get('calidad')
+    labor_id = request.query_params.get('labor_id')
+    socio_id = request.query_params.get('socio_id')
+    especie = request.query_params.get('especie')
+    unidad_medida = request.query_params.get('unidad_medida')
+    ubicacion_almacen = request.query_params.get('ubicacion_almacen')
+
+    # Aplicar filtros
+    if fecha_cosecha_desde:
+        queryset = queryset.filter(fecha_cosecha__gte=fecha_cosecha_desde)
+    if fecha_cosecha_hasta:
+        queryset = queryset.filter(fecha_cosecha__lte=fecha_cosecha_hasta)
+    if cultivo_id:
+        queryset = queryset.filter(cultivo_id=cultivo_id)
+    if campania_id:
+        queryset = queryset.filter(campania_id=campania_id)
+    if parcela_id:
+        queryset = queryset.filter(parcela_id=parcela_id)
+    if estado:
+        queryset = queryset.filter(estado=estado)
+    if lote:
+        queryset = queryset.filter(lote=lote)
+    if calidad:
+        queryset = queryset.filter(calidad__icontains=calidad)
+    if labor_id:
+        queryset = queryset.filter(labor_id=labor_id)
+    if socio_id:
+        queryset = queryset.filter(
+            Q(parcela__socio_id=socio_id) | 
+            Q(campania__socios_asignados__socio_id=socio_id)
+        ).distinct()
+    if especie:
+        queryset = queryset.filter(cultivo__especie__icontains=especie)
+    if unidad_medida:
+        queryset = queryset.filter(unidad_medida__icontains=unidad_medida)
+    if ubicacion_almacen:
+        queryset = queryset.filter(ubicacion_almacen__icontains=ubicacion_almacen)
+
+    # Paginación
+    page = int(request.query_params.get('page', 1))
+    page_size = int(request.query_params.get('page_size', 20))
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    total_count = queryset.count()
+    productos = queryset[start:end]
+
+    serializer = ProductoCosechadoListSerializer(productos, many=True)
+
+    return Response({
+        'count': total_count,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': (total_count + page_size - 1) // page_size,
+        'filtros_aplicados': {
+            'fecha_cosecha_desde': fecha_cosecha_desde,
+            'fecha_cosecha_hasta': fecha_cosecha_hasta,
+            'cultivo_id': cultivo_id,
+            'campania_id': campania_id,
+            'parcela_id': parcela_id,
+            'estado': estado,
+            'lote': lote,
+            'calidad': calidad,
+            'labor_id': labor_id,
+            'socio_id': socio_id,
+            'especie': especie,
+            'unidad_medida': unidad_medida,
+            'ubicacion_almacen': ubicacion_almacen
+        },
+        'results': serializer.data
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def reporte_productos_cosechados_por_periodo(request):
+    """
+    CU15: Reporte de productos cosechados por período
+    GET /api/productos-cosechados/reporte_por_periodo/?fecha_desde=YYYY-MM-DD&fecha_hasta=YYYY-MM-DD
+    """
+    from django.db.models import Count, Sum, Avg
+    from datetime import datetime
+
+    fecha_desde = request.query_params.get('fecha_desde')
+    fecha_hasta = request.query_params.get('fecha_hasta')
+
+    # Validar fechas
+    if not fecha_desde or not fecha_hasta:
+        return Response({
+            'error': 'fecha_desde y fecha_hasta son requeridos'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        fecha_desde = datetime.strptime(fecha_desde, '%Y-%m-%d').date()
+        fecha_hasta = datetime.strptime(fecha_hasta, '%Y-%m-%d').date()
+    except ValueError:
+        return Response({
+            'error': 'Formato de fecha inválido. Use YYYY-MM-DD'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Filtrar productos por período
+    productos = ProductoCosechado.objects.filter(
+        fecha_cosecha__range=[fecha_desde, fecha_hasta]
+    )
+
+    # Estadísticas generales
+    total_productos = productos.count()
+    total_cantidad = productos.aggregate(total=Sum('cantidad'))['total'] or 0
+
+    # Productos por cultivo
+    productos_por_cultivo = productos.values('cultivo__especie').annotate(
+        cantidad_total=Sum('cantidad'),
+        num_productos=Count('id')
+    ).order_by('-cantidad_total')[:10]
+
+    # Productos por estado
+    productos_por_estado = productos.values('estado').annotate(
+        cantidad_total=Sum('cantidad'),
+        num_productos=Count('id')
+    ).order_by('-cantidad_total')
+
+    # Productos por campaña
+    productos_por_campania = productos.filter(campania__isnull=False).values(
+        'campania__nombre'
+    ).annotate(
+        cantidad_total=Sum('cantidad'),
+        num_productos=Count('id')
+    ).order_by('-cantidad_total')
+
+    # Productos por parcela
+    productos_por_parcela = productos.filter(parcela__isnull=False).values(
+        'parcela__nombre'
+    ).annotate(
+        cantidad_total=Sum('cantidad'),
+        num_productos=Count('id')
+    ).order_by('-cantidad_total')[:10]
+
+    # Evolución mensual
+    evolucion_mensual = productos.annotate(
+        mes=TruncMonth('fecha_cosecha')
+    ).values('mes').annotate(
+        cantidad_mensual=Sum('cantidad'),
+        productos_mensual=Count('id')
+    ).order_by('mes')
+
+    return Response({
+        'periodo': {
+            'fecha_desde': fecha_desde.isoformat(),
+            'fecha_hasta': fecha_hasta.isoformat(),
+            'dias': (fecha_hasta - fecha_desde).days
+        },
+        'estadisticas_generales': {
+            'total_productos': total_productos,
+            'total_cantidad': float(total_cantidad),
+            'promedio_cantidad_por_producto': float(total_cantidad / total_productos) if total_productos > 0 else 0
+        },
+        'productos_por_cultivo': list(productos_por_cultivo),
+        'productos_por_estado': list(productos_por_estado),
+        'productos_por_campania': list(productos_por_campania),
+        'productos_por_parcela': list(productos_por_parcela),
+        'evolucion_mensual': list(evolucion_mensual)
+    })
