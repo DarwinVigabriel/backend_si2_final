@@ -7,7 +7,7 @@ from .models import (
     Parcela, Cultivo, BitacoraAuditoria,
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
     Semilla, Pesticida, Fertilizante,
-    Campaign, CampaignPartner, CampaignPlot
+    Campaign, CampaignPartner, CampaignPlot, Labor, ProductoCosechado
 )
 
 
@@ -1236,3 +1236,466 @@ class CampaignListSerializer(serializers.ModelSerializer):
 
     def get_total_parcelas(self, obj):
         return obj.parcelas.count()
+    
+
+class LaborSerializer(serializers.ModelSerializer):
+    """CU10: Serializer para gestión de labores agrícolas"""
+    # Campos de relación (solo lectura para mostrar información)
+    campaña_nombre = serializers.CharField(source='campaña.nombre', read_only=True)
+    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
+    socio_nombre = serializers.CharField(source='parcela.socio.usuario.get_full_name', read_only=True)
+    insumo_nombre = serializers.CharField(source='insumo.nombre', read_only=True)
+    responsable_nombre = serializers.CharField(source='responsable.get_full_name', read_only=True)
+    
+    # Campos calculados
+    costo_total = serializers.SerializerMethodField()
+    duracion_display = serializers.SerializerMethodField()
+    tipo_labor_display = serializers.SerializerMethodField()
+    puede_descontar_insumo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Labor
+        fields = [
+            'id', 'fecha_labor', 'labor', 'tipo_labor_display', 'estado',
+            'insumo', 'insumo_nombre', 'cantidad_insumo',
+            'campaña', 'campaña_nombre', 'parcela', 'parcela_nombre', 'socio_nombre',
+            'descripcion', 'observaciones', 'costo_estimado', 'duracion_horas', 'duracion_display',
+            'responsable', 'responsable_nombre', 'creado_en', 'actualizado_en',
+            # Campos calculados
+            'costo_total', 'puede_descontar_insumo'
+        ]
+        read_only_fields = ['creado_en', 'actualizado_en']
+
+    def get_costo_total(self, obj):
+        return obj.costo_total()
+
+    def get_duracion_display(self, obj):
+        return obj.duracion_display()
+
+    def get_tipo_labor_display(self, obj):
+        return obj.get_tipo_labor_display()
+
+    def get_puede_descontar_insumo(self, obj):
+        return obj.puede_descontar_insumo()
+
+    def validate_fecha_labor(self, value):
+        """Validación de fecha de labor"""
+        from datetime import date
+        if value > date.today():
+            raise serializers.ValidationError('La fecha de la labor no puede ser en el futuro')
+        return value
+
+    def validate_cantidad_insumo(self, value):
+        """Validación de cantidad de insumo"""
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('La cantidad de insumo debe ser mayor a 0')
+        return value
+
+    def validate_costo_estimado(self, value):
+        """Validación de costo estimado"""
+        if value is not None and value < 0:
+            raise serializers.ValidationError('El costo estimado no puede ser negativo')
+        return value
+
+    def validate_duracion_horas(self, value):
+        """Validación de duración en horas"""
+        if value is not None and value <= 0:
+            raise serializers.ValidationError('La duración debe ser mayor a 0')
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        # Validar que al menos una de las dos (campaña o parcela) esté presente
+        campaña = data.get('campaña') or (self.instance.campaña if self.instance else None)
+        parcela = data.get('parcela') or (self.instance.parcela if self.instance else None)
+        
+        if not campaña and not parcela:
+            raise serializers.ValidationError({
+                'campaña': 'Debe especificar al menos una campaña o una parcela.',
+                'parcela': 'Debe especificar al menos una campaña o una parcela.'
+            })
+
+        # Validar que la fecha esté dentro del rango de la campaña, si se especifica campaña
+        fecha_labor = data.get('fecha_labor') or (self.instance.fecha_labor if self.instance else None)
+        if campaña and fecha_labor:
+            if fecha_labor < campaña.fecha_inicio:
+                raise serializers.ValidationError({
+                    'fecha_labor': f'La fecha de la labor no puede ser anterior al inicio de la campaña ({campaña.fecha_inicio})'
+                })
+            if campaña.fecha_fin and fecha_labor > campaña.fecha_fin:
+                raise serializers.ValidationError({
+                    'fecha_labor': f'La fecha de la labor no puede ser posterior al fin de la campaña ({campaña.fecha_fin})'
+                })
+
+        # Validar que si se usa insumo, se especifique cantidad
+        insumo = data.get('insumo') or (self.instance.insumo if self.instance else None)
+        cantidad_insumo = data.get('cantidad_insumo') or (self.instance.cantidad_insumo if self.instance else None)
+        
+        if insumo and not cantidad_insumo:
+            raise serializers.ValidationError({
+                'cantidad_insumo': 'Debe especificar la cantidad de insumo utilizada'
+            })
+
+        # Validar que la cantidad de insumo no exceda el stock disponible
+        if insumo and cantidad_insumo:
+            # Asumiendo que el modelo Insumo tiene un campo 'cantidad_disponible'
+            if cantidad_insumo > insumo.cantidad_disponible:
+                raise serializers.ValidationError({
+                    'cantidad_insumo': f'Cantidad insuficiente. Stock disponible: {insumo.cantidad_disponible}'
+                })
+
+        # Validar que la parcela esté activa
+        if parcela and parcela.estado != 'ACTIVA':
+            raise serializers.ValidationError({
+                'parcela': 'Solo se pueden asignar labores a parcelas activas'
+            })
+
+        return data
+
+    def create(self, validated_data):
+        """Crear una nueva labor con validaciones adicionales"""
+        # Llamar al método clean del modelo para validaciones adicionales
+        labor = Labor(**validated_data)
+        labor.clean()  # Ejecutar validaciones del modelo
+        
+        # Guardar la labor
+        labor.save()
+        return labor
+
+    def update(self, instance, validated_data):
+        """Actualizar una labor existente con validaciones adicionales"""
+        # Actualizar campos
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        # Llamar al método clean del modelo para validaciones adicionales
+        instance.clean()  # Ejecutar validaciones del modelo
+        
+        # Guardar la labor
+        instance.save()
+        return instance
+
+
+class LaborCreateSerializer(serializers.ModelSerializer):
+    """CU10: Serializer específico para creación de labores (sin campos de solo lectura)"""
+    class Meta:
+        model = Labor
+        fields = [
+            'fecha_labor', 'labor', 'estado', 'insumo', 'cantidad_insumo',
+            'campaña', 'parcela', 'descripcion', 'observaciones', 
+            'costo_estimado', 'duracion_horas', 'responsable'
+        ]
+
+    def validate(self, data):
+        """Validaciones específicas para creación"""
+        # Llamar a las validaciones del serializer principal
+        serializer = LaborSerializer(data=data, context=self.context)
+        serializer.is_valid(raise_exception=True)
+        return data
+
+
+class LaborUpdateSerializer(serializers.ModelSerializer):
+    """CU10: Serializer específico para actualización de labores"""
+    class Meta:
+        model = Labor
+        fields = [
+            'fecha_labor', 'labor', 'estado', 'insumo', 'cantidad_insumo',
+            'campaña', 'parcela', 'descripcion', 'observaciones',
+            'costo_estimado', 'duracion_horas', 'responsable'
+        ]
+
+    def validate(self, data):
+        """Validaciones específicas para actualización"""
+        # Llamar a las validaciones del serializer principal
+        if self.instance:
+            serializer = LaborSerializer(self.instance, data=data, partial=True, context=self.context)
+        else:
+            serializer = LaborSerializer(data=data, context=self.context)
+        serializer.is_valid(raise_exception=True)
+        return data
+
+
+class LaborListSerializer(serializers.ModelSerializer):
+    """CU10: Serializer simplificado para listados de labores"""
+    campaña_nombre = serializers.CharField(source='campaña.nombre', read_only=True)
+    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
+    socio_nombre = serializers.CharField(source='parcela.socio.usuario.get_full_name', read_only=True)
+    tipo_labor_display = serializers.SerializerMethodField()
+    costo_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Labor
+        fields = [
+            'id', 'fecha_labor', 'labor', 'tipo_labor_display', 'estado',
+            'campaña_nombre', 'parcela_nombre', 'socio_nombre',
+            'costo_total', 'creado_en'
+        ]
+
+    def get_tipo_labor_display(self, obj):
+        return obj.get_tipo_labor_display()
+
+    def get_costo_total(self, obj):
+        return obj.costo_total()
+    
+
+# ============================================================================
+# CU15: SERIALIZERS PARA REGISTRO DE PRODUCTOS COSECHADOS
+# Registrar productos cosechados por campaña y parcela
+# ============================================================================
+
+class ProductoCosechadoSerializer(serializers.ModelSerializer):
+    """CU15: Serializer principal para Productos Cosechados"""
+    
+    # Campos de relación (solo lectura para mostrar información)
+    cultivo_especie = serializers.CharField(source='cultivo.especie', read_only=True)
+    cultivo_variedad = serializers.CharField(source='cultivo.variedad', read_only=True)
+    labor_nombre = serializers.CharField(source='labor.labor', read_only=True)
+    campania_nombre = serializers.CharField(source='campania.nombre', read_only=True)
+    parcela_nombre = serializers.CharField(source='parcela.nombre', read_only=True)
+    socio_nombre = serializers.SerializerMethodField()
+    
+    # Campos calculados
+    origen_display = serializers.SerializerMethodField()
+    dias_en_almacen = serializers.SerializerMethodField()
+    esta_proximo_vencer = serializers.SerializerMethodField()
+    puede_vender = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductoCosechado
+        fields = [
+            'id', 'fecha_cosecha', 'cantidad', 'unidad_medida', 'calidad',
+            'cultivo', 'cultivo_especie', 'cultivo_variedad',
+            'labor', 'labor_nombre',
+            'estado', 'lote', 'ubicacion_almacen',
+            'campania', 'campania_nombre', 'parcela', 'parcela_nombre', 'socio_nombre',
+            'observaciones', 'creado_en', 'actualizado_en',
+            # Campos calculados
+            'origen_display', 'dias_en_almacen', 'esta_proximo_vencer', 'puede_vender'
+        ]
+        read_only_fields = ['creado_en', 'actualizado_en']
+
+    def get_socio_nombre(self, obj):
+        """Obtener el nombre del socio desde cultivo o parcela"""
+        if obj.parcela:
+            return obj.parcela.socio.usuario.get_full_name()
+        elif obj.campania and obj.campania.socios_asignados.exists():
+            # Intentar obtener el socio de la campaña
+            socio_campania = obj.campania.socios_asignados.first()
+            return socio_campania.socio.usuario.get_full_name()
+        elif obj.cultivo:
+            return obj.cultivo.parcela.socio.usuario.get_full_name()
+        return "No asignado"
+
+    def get_origen_display(self, obj):
+        return obj.origen_display
+
+    def get_dias_en_almacen(self, obj):
+        return obj.dias_en_almacen()
+
+    def get_esta_proximo_vencer(self, obj):
+        return obj.esta_proximo_vencer()
+
+    def get_puede_vender(self, obj):
+        return obj.puede_vender()
+
+    def validate_fecha_cosecha(self, value):
+        """Validación de fecha de cosecha"""
+        from datetime import date
+        if value > date.today():
+            raise serializers.ValidationError('La fecha de cosecha no puede ser en el futuro')
+        return value
+
+    def validate_cantidad(self, value):
+        """Validación de cantidad"""
+        if value <= 0:
+            raise serializers.ValidationError('La cantidad debe ser mayor a 0')
+        return value
+
+    def validate_lote(self, value):
+        """Validación de lote"""
+        if value <= 0:
+            raise serializers.ValidationError('El número de lote debe ser mayor a 0')
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        campania = data.get('campania') or (self.instance.campania if self.instance else None)
+        parcela = data.get('parcela') or (self.instance.parcela if self.instance else None)
+        labor = data.get('labor') or (self.instance.labor if self.instance else None)
+
+        # Validar que al menos una de las dos (campaña o parcela) esté presente
+        if not campania and not parcela:
+            raise serializers.ValidationError({
+                'campania': 'Debe especificar al menos una campaña o una parcela.',
+                'parcela': 'Debe especificar al menos una campaña o una parcela.'
+            })
+
+        # Validar que no se especifiquen ambas opciones
+        if campania and parcela:
+            raise serializers.ValidationError({
+                'campania': 'Solo puede especificar campaña O parcela, no ambas.',
+                'parcela': 'Solo puede especificar campaña O parcela, no ambas.'
+            })
+
+        # Validar que la labor esté relacionada con la misma campaña/parcela si se especifica
+        if labor:
+            if campania and labor.campania != campania:
+                raise serializers.ValidationError({
+                    'labor': f'La labor seleccionada no pertenece a la campaña {campania.nombre}.'
+                })
+
+            if parcela and labor.parcela != parcela:
+                raise serializers.ValidationError({
+                    'labor': f'La labor seleccionada no pertenece a la parcela {parcela.nombre}.'
+                })
+
+        return data
+
+    def create(self, validated_data):
+        """Crear un nuevo producto cosechado con validaciones adicionales"""
+        # Llamar al método clean del modelo para validaciones adicionales
+        producto = ProductoCosechado(**validated_data)
+        producto.clean()  # Ejecutar validaciones del modelo
+        
+        # Guardar el producto
+        producto.save()
+        return producto
+
+    def update(self, instance, validated_data):
+        """Actualizar un producto cosechado existente con validaciones adicionales"""
+        # Actualizar campos
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        # Llamar al método clean del modelo para validaciones adicionales
+        instance.clean()  # Ejecutar validaciones del modelo
+        
+        # Guardar el producto
+        instance.save()
+        return instance
+
+
+class ProductoCosechadoCreateSerializer(serializers.ModelSerializer):
+    """CU15: Serializer específico para creación de productos cosechados (sin campos de solo lectura)"""
+    class Meta:
+        model = ProductoCosechado
+        fields = [
+            'fecha_cosecha', 'cantidad', 'unidad_medida', 'calidad',
+            'cultivo', 'labor', 'estado', 'lote', 'ubicacion_almacen',
+            'campania', 'parcela', 'observaciones'
+        ]
+
+    def validate(self, data):
+        """Validaciones específicas para creación"""
+        # Llamar a las validaciones del serializer principal
+        serializer = ProductoCosechadoSerializer(data=data, context=self.context)
+        serializer.is_valid(raise_exception=True)
+        return data
+
+
+class ProductoCosechadoUpdateSerializer(serializers.ModelSerializer):
+    """CU15: Serializer específico para actualización de productos cosechados"""
+    class Meta:
+        model = ProductoCosechado
+        fields = [
+            'fecha_cosecha', 'cantidad', 'unidad_medida', 'calidad',
+            'cultivo', 'labor', 'estado', 'lote', 'ubicacion_almacen',
+            'campania', 'parcela', 'observaciones'
+        ]
+
+    def validate(self, data):
+        """Validaciones específicas para actualización"""
+        # Llamar a las validaciones del serializer principal
+        if self.instance:
+            serializer = ProductoCosechadoSerializer(self.instance, data=data, partial=True, context=self.context)
+        else:
+            serializer = ProductoCosechadoSerializer(data=data, context=self.context)
+        serializer.is_valid(raise_exception=True)
+        return data
+
+
+class ProductoCosechadoListSerializer(serializers.ModelSerializer):
+    """CU15: Serializer simplificado para listados de productos cosechados"""
+    cultivo_especie = serializers.CharField(source='cultivo.especie', read_only=True)
+    origen_display = serializers.SerializerMethodField()
+    socio_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductoCosechado
+        fields = [
+            'id', 'fecha_cosecha', 'cantidad', 'unidad_medida', 'calidad',
+            'cultivo_especie', 'estado', 'lote', 'ubicacion_almacen',
+            'origen_display', 'socio_nombre', 'creado_en'
+        ]
+
+    def get_origen_display(self, obj):
+        return obj.origen_display
+
+    def get_socio_nombre(self, obj):
+        """Obtener el nombre del socio desde cultivo o parcela"""
+        if obj.parcela:
+            return obj.parcela.socio.usuario.get_full_name()
+        elif obj.campania and obj.campania.socios_asignados.exists():
+            socio_campania = obj.campania.socios_asignados.first()
+            return socio_campania.socio.usuario.get_full_name()
+        elif obj.cultivo:
+            return obj.cultivo.parcela.socio.usuario.get_full_name()
+        return "No asignado"
+
+
+class ProductoCosechadoVenderSerializer(serializers.Serializer):
+    """CU15: Serializer específico para vender productos cosechados"""
+    cantidad_vendida = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0.01, message='La cantidad vendida debe ser mayor a 0')]
+    )
+    observaciones = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_cantidad_vendida(self, value):
+        """Validar que la cantidad a vender sea válida"""
+        producto = self.context.get('producto')
+        if producto and value > producto.cantidad:
+            raise serializers.ValidationError(
+                f'Cantidad insuficiente. Disponible: {producto.cantidad}'
+            )
+        return value
+
+    def save(self, **kwargs):
+        """Ejecutar la venta del producto"""
+        producto = self.context.get('producto')
+        cantidad_vendida = self.validated_data['cantidad_vendida']
+        observaciones = self.validated_data.get('observaciones', '')
+
+        if producto:
+            producto.vender_producto(cantidad_vendida, observaciones)
+        
+        return producto
+
+
+class ProductoCosechadoCambiarEstadoSerializer(serializers.Serializer):
+    """CU15: Serializer específico para cambiar estado de productos cosechados"""
+    nuevo_estado = serializers.ChoiceField(
+        choices=ProductoCosechado.ESTADO_OPCIONES
+    )
+    observaciones = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_nuevo_estado(self, value):
+        """Validar el nuevo estado"""
+        producto = self.context.get('producto')
+        if producto and producto.estado == value:
+            raise serializers.ValidationError(
+                f'El producto ya se encuentra en estado {value}'
+            )
+        return value
+
+    def save(self, **kwargs):
+        """Ejecutar el cambio de estado"""
+        producto = self.context.get('producto')
+        nuevo_estado = self.validated_data['nuevo_estado']
+        observaciones = self.validated_data.get('observaciones', '')
+
+        if producto:
+            producto.cambiar_estado(nuevo_estado, observaciones)
+        
+        return producto
