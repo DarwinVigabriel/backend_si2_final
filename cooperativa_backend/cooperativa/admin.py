@@ -783,126 +783,185 @@ class FertilizanteAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).order_by('-creado_en')
 
-
 @admin.register(Labor)
 class LaborAdmin(admin.ModelAdmin):
     """
-    CU10: Administración de labores agrícolas en Django Admin
-    T047: Gestión de labores (registrar, editar, eliminar)
-    T048: Descuento de insumos del inventario
-    T049: Validación de fechas dentro de campaña
+    CU: Administración de Labores Agrícolas en Django Admin
+    Gestión de labores agrícolas (siembra, riego, fertilización, cosecha, fumigación)
     """
     list_display = (
-        'id', 'fecha_labor', 'labor', 'estado', 'campaña', 'parcela',
-        'insumo', 'cantidad_insumo', 'costo_total', 'responsable', 'creado_en'
+        'id', 'labor_display', 'fecha_labor', 'estado_badge', 
+        'campaña_display', 'parcela_display', 'creado_en'
     )
+    
     list_filter = (
-        'labor', 'estado', 'campaña', 'parcela__socio', 
-        'fecha_labor', 'creado_en'
+        'labor', 'estado', 'fecha_labor', 'campaña', 'parcela__socio',
+        'creado_en'
     )
+    
     search_fields = (
-        'descripcion', 'observaciones', 'parcela__nombre',
-        'campaña__nombre', 'responsable__usuario'
+        'labor', 'observaciones', 'campaña__nombre', 
+        'parcela__nombre', 'parcela__socio__usuario__nombres'
     )
+    
     readonly_fields = (
-        'creado_en', 'actualizado_en', 'costo_total',
-        'duracion_display', 'tipo_labor_display', 'puede_descontar_insumo'
+        'creado_en', 'actualizado_en', 'validaciones_info'
     )
-    list_editable = ('estado',)
+    
+    list_editable = ('fecha_labor',)
+    
     date_hierarchy = 'fecha_labor'
-    raw_id_fields = ('campaña', 'parcela', 'insumo', 'responsable')
-
+    
     fieldsets = (
-        ('Información Básica', {
-            'fields': ('fecha_labor', 'labor', 'estado', 'responsable')
+        ('Información Principal', {
+            'fields': (
+                'fecha_labor', 'labor', 'estado', 'observaciones'
+            )
         }),
-        ('Ubicación', {
-            'fields': ('campaña', 'parcela')
-        }),
-        ('Insumos y Costos', {
-            'fields': ('insumo', 'cantidad_insumo', 'costo_estimado')
-        }),
-        ('Detalles de la Labor', {
-            'fields': ('descripcion', 'observaciones', 'duracion_horas')
-        }),
-        ('Campos Calculados', {
-            'fields': ('costo_total', 'duracion_display', 'tipo_labor_display', 'puede_descontar_insumo'),
-            'classes': ('collapse',)
+        ('Relaciones', {
+            'fields': (
+                'campaña', 'parcela'
+            )
         }),
         ('Auditoría', {
-            'fields': ('creado_en', 'actualizado_en'),
+            'fields': (
+                'validaciones_info', 'creado_en', 'actualizado_en'
+            ),
             'classes': ('collapse',)
         }),
     )
-
+    
+    raw_id_fields = ('campaña', 'parcela')
+    
     actions = [
-        'marcar_como_planificada',
-        'marcar_como_en_proceso',
         'marcar_como_completada',
+        'marcar_como_en_proceso', 
+        'marcar_como_planificada',
         'marcar_como_cancelada',
         'exportar_labores_csv'
     ]
 
-    def costo_total(self, obj):
-        return f"{obj.costo_total():.2f} Bs" if obj.costo_total() else "N/A"
-    costo_total.short_description = 'Costo Total'
+    def labor_display(self, obj):
+        """Muestra el tipo de labor con icono"""
+        icons = {
+            'SIEMBRA': '🌱',
+            'RIEGO': '💧',
+            'FERTILIZACION': '🧪',
+            'COSECHA': '📦',
+            'FUMIGACION': '🦠'
+        }
+        icon = icons.get(obj.labor, '📋')
+        return f"{icon} {obj.get_labor_display()}"
+    labor_display.short_description = 'Labor'
+    labor_display.admin_order_field = 'labor'
 
-    def duracion_display(self, obj):
-        return obj.duracion_display()
-    duracion_display.short_description = 'Duración'
-
-    def tipo_labor_display(self, obj):
-        return obj.get_tipo_labor_display()
-    tipo_labor_display.short_description = 'Tipo de Labor'
-
-    def puede_descontar_insumo(self, obj):
-        return "Sí" if obj.puede_descontar_insumo() else "No"
-    puede_descontar_insumo.short_description = 'Descuenta Insumo'
-
-    def marcar_como_planificada(self, request, queryset):
-        updated = queryset.update(estado='PLANIFICADA')
-        self.message_user(
-            request,
-            f'{updated} labor(es) marcada(s) como planificada(s).'
+    def estado_badge(self, obj):
+        """Muestra el estado con colores"""
+        colors = {
+            'PLANIFICADA': 'blue',
+            'EN_PROCESO': 'orange',
+            'COMPLETADA': 'green',
+            'CANCELADA': 'red'
+        }
+        color = colors.get(obj.estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            obj.get_estado_display()
         )
-    marcar_como_planificada.short_description = "Marcar como Planificada"
+    estado_badge.short_description = 'Estado'
+    estado_badge.admin_order_field = 'estado'
 
-    def marcar_como_en_proceso(self, request, queryset):
-        updated = queryset.update(estado='EN_PROCESO')
-        self.message_user(
-            request,
-            f'{updated} labor(es) marcada(s) como en proceso.'
-        )
-    marcar_como_en_proceso.short_description = "Marcar como En Proceso"
+    def campaña_display(self, obj):
+        """Muestra información de la campaña"""
+        if obj.campaña:
+            return format_html(
+                '<span title="{}">{}</span>',
+                f"{obj.campaña.fecha_inicio} a {obj.campaña.fecha_fin}",
+                obj.campaña.nombre
+            )
+        return "—"
+    campaña_display.short_description = 'Campaña'
+
+    def parcela_display(self, obj):
+        """Muestra información de la parcela"""
+        if obj.parcela:
+            socio = obj.parcela.socio
+            return format_html(
+                '{}<br><small style="color: #666;">{}</small>',
+                obj.parcela.nombre,
+                f"{socio.usuario.nombres} {socio.usuario.apellidos}"
+            )
+        return "—"
+    parcela_display.short_description = 'Parcela'
+
+    def validaciones_info(self, obj):
+        """Muestra información de validaciones"""
+        messages = []
+        
+        # Validar fecha con campaña
+        if obj.campaña and obj.fecha_labor:
+            if obj.fecha_labor < obj.campaña.fecha_inicio:
+                messages.append(f"⚠️ La fecha está ANTES de la campaña")
+            elif obj.fecha_labor > obj.campaña.fecha_fin:
+                messages.append(f"⚠️ La fecha está DESPUÉS de la campaña")
+            else:
+                messages.append("✅ Fecha dentro del rango de campaña")
+        
+        # Validar estado de parcela
+        if obj.parcela:
+            if obj.parcela.estado == 'ACTIVA':
+                messages.append("✅ Parcela activa")
+            else:
+                messages.append(f"❌ Parcela {obj.parcela.get_estado_display().lower()}")
+        
+        # Validar que tenga al menos campaña o parcela
+        if not obj.campaña and not obj.parcela:
+            messages.append("❌ Falta campaña y parcela")
+        else:
+            messages.append("✅ Tiene campaña o parcela")
+        
+        return format_html("<br>".join(messages))
+    validaciones_info.short_description = 'Validaciones'
 
     def marcar_como_completada(self, request, queryset):
-        # Si se completan labores con insumos, descontar del inventario
-        for labor in queryset:
-            if labor.estado != 'COMPLETADA' and labor.insumo and labor.cantidad_insumo:
-                labor._descontar_insumo()
-        
+        """Acción para marcar labores como completadas"""
         updated = queryset.update(estado='COMPLETADA')
         self.message_user(
-            request,
+            request, 
             f'{updated} labor(es) marcada(s) como completada(s).'
         )
-    marcar_como_completada.short_description = "Marcar como Completada"
+    marcar_como_completada.short_description = "Marcar como COMPLETADA"
+
+    def marcar_como_en_proceso(self, request, queryset):
+        """Acción para marcar labores como en proceso"""
+        updated = queryset.update(estado='EN_PROCESO')
+        self.message_user(
+            request, 
+            f'{updated} labor(es) marcada(s) como en proceso.'
+        )
+    marcar_como_en_proceso.short_description = "Marcar como EN PROCESO"
+
+    def marcar_como_planificada(self, request, queryset):
+        """Acción para marcar labores como planificadas"""
+        updated = queryset.update(estado='PLANIFICADA')
+        self.message_user(
+            request, 
+            f'{updated} labor(es) marcada(s) como planificada(s).'
+        )
+    marcar_como_planificada.short_description = "Marcar como PLANIFICADA"
 
     def marcar_como_cancelada(self, request, queryset):
-        # Si se cancelan labores completadas con insumos, revertir el descuento
-        for labor in queryset:
-            if labor.estado == 'COMPLETADA' and labor.insumo and labor.cantidad_insumo:
-                labor.insumo.cantidad_disponible += labor.cantidad_insumo
-                labor.insumo.save()
-        
+        """Acción para marcar labores como canceladas"""
         updated = queryset.update(estado='CANCELADA')
         self.message_user(
-            request,
+            request, 
             f'{updated} labor(es) marcada(s) como cancelada(s).'
         )
-    marcar_como_cancelada.short_description = "Marcar como Cancelada"
+    marcar_como_cancelada.short_description = "Marcar como CANCELADA"
 
     def exportar_labores_csv(self, request, queryset):
+        """Exportar labores seleccionadas a CSV"""
         import csv
         from django.http import HttpResponse
         from datetime import datetime
@@ -912,38 +971,37 @@ class LaborAdmin(admin.ModelAdmin):
 
         writer = csv.writer(response)
         writer.writerow([
-            'ID', 'Fecha Labor', 'Tipo Labor', 'Estado', 'Campaña',
-            'Parcela', 'Insumo', 'Cantidad Insumo', 'Costo Estimado',
-            'Costo Total', 'Duración', 'Responsable', 'Descripción'
+            'ID', 'Labor', 'Fecha', 'Estado', 'Campaña', 
+            'Parcela', 'Observaciones', 'Creado'
         ])
 
         for labor in queryset:
             writer.writerow([
                 labor.id,
+                labor.get_labor_display(),
                 labor.fecha_labor,
-                labor.get_tipo_labor_display(),
-                labor.estado,
+                labor.get_estado_display(),
                 labor.campaña.nombre if labor.campaña else '',
                 labor.parcela.nombre if labor.parcela else '',
-                str(labor.insumo) if labor.insumo else '',
-                labor.cantidad_insumo or '',
-                labor.costo_estimado or '',
-                labor.costo_total(),
-                labor.duracion_display(),
-                labor.responsable.get_full_name() if labor.responsable else '',
-                labor.descripcion or ''
+                labor.observaciones or '',
+                labor.creado_en.strftime('%Y-%m-%d %H:%M')
             ])
 
         self.message_user(request, f'Exportadas {queryset.count()} labores a CSV.')
         return response
-
     exportar_labores_csv.short_description = "Exportar labores a CSV"
 
     def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
         return super().get_queryset(request).select_related(
-            'campaña', 'parcela__socio__usuario', 'insumo', 'responsable'
-        ).order_by('-fecha_labor', '-creado_en')
+            'campaña', 'parcela__socio__usuario'
+        ).order_by('-fecha_labor')
 
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        """Filtrar parcelas activas en el formulario"""
+        if db_field.name == "parcela":
+            kwargs["queryset"] = Parcela.objects.filter(estado='ACTIVA').select_related('socio__usuario')
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 @admin.register(ProductoCosechado)
 class ProductoCosechadoAdmin(admin.ModelAdmin):
