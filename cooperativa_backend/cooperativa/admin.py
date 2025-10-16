@@ -1,9 +1,19 @@
 from django.contrib import admin
 from django import forms
 from django.utils import timezone
-from .models import Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, Fertilizante
+from django.utils.html import format_html
+from .models import (
+    Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, 
+    BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, 
+    Fertilizante, Labor, ProductoCosechado 
+)
 
 # Register your models here.
+
+# Branding del panel administrativo (no afecta otros CU)
+admin.site.site_header = "🌱 Cooperativa Agrícola – Panel Administrativo"
+admin.site.site_title = "Cooperativa Admin"
+admin.site.index_title = "Inicio del Panel"
 
 @admin.register(Rol)
 class RolAdmin(admin.ModelAdmin):
@@ -772,3 +782,387 @@ class FertilizanteAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).order_by('-creado_en')
+
+@admin.register(Labor)
+class LaborAdmin(admin.ModelAdmin):
+    """
+    CU: Administración de Labores Agrícolas en Django Admin
+    Gestión de labores agrícolas (siembra, riego, fertilización, cosecha, fumigación)
+    """
+    list_display = (
+        'id', 'labor_display', 'fecha_labor', 'estado_badge', 
+        'campania_display', 'parcela_display', 'creado_en'
+    )
+    
+    list_filter = (
+        'labor', 'estado', 'fecha_labor', 'campania', 'parcela__socio',
+        'creado_en'
+    )
+    
+    search_fields = (
+        'labor', 'observaciones', 'campania__nombre', 
+        'parcela__nombre', 'parcela__socio__usuario__nombres'
+    )
+    
+    readonly_fields = (
+        'creado_en', 'actualizado_en', 'validaciones_info'
+    )
+    
+    list_editable = ('fecha_labor',)
+    
+    date_hierarchy = 'fecha_labor'
+    
+    fieldsets = (
+        ('Información Principal', {
+            'fields': (
+                'fecha_labor', 'labor', 'estado', 'observaciones'
+            )
+        }),
+        ('Relaciones', {
+            'fields': (
+                'campania', 'parcela'
+            )
+        }),
+        ('Auditoría', {
+            'fields': (
+                'validaciones_info', 'creado_en', 'actualizado_en'
+            ),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    raw_id_fields = ('campania', 'parcela')
+    
+    actions = [
+        'marcar_como_completada',
+        'marcar_como_en_proceso', 
+        'marcar_como_planificada',
+        'marcar_como_cancelada',
+        'exportar_labores_csv'
+    ]
+
+    def labor_display(self, obj):
+        """Muestra el tipo de labor con icono"""
+        icons = {
+            'SIEMBRA': '🌱',
+            'RIEGO': '💧',
+            'FERTILIZACION': '🧪',
+            'COSECHA': '📦',
+            'FUMIGACION': '🦠'
+        }
+        icon = icons.get(obj.labor, '📋')
+        return f"{icon} {obj.get_labor_display()}"
+    labor_display.short_description = 'Labor'
+    labor_display.admin_order_field = 'labor'
+
+    def estado_badge(self, obj):
+        """Muestra el estado con colores"""
+        colors = {
+            'PLANIFICADA': 'blue',
+            'EN_PROCESO': 'orange',
+            'COMPLETADA': 'green',
+            'CANCELADA': 'red'
+        }
+        color = colors.get(obj.estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            obj.get_estado_display()
+        )
+    estado_badge.short_description = 'Estado'
+    estado_badge.admin_order_field = 'estado'
+
+    def campania_display(self, obj):
+        if obj.campania:
+         return format_html(
+            '<span title="{}">{}</span>',
+            f"{obj.campania.fecha_inicio} a {obj.campania.fecha_fin}",
+            obj.campania.nombre
+        )
+        return "—"
+    campania_display.short_description = 'campania'
+
+    def parcela_display(self, obj):
+        """Muestra información de la parcela"""
+        if obj.parcela:
+            socio = obj.parcela.socio
+            return format_html(
+                '{}<br><small style="color: #666;">{}</small>',
+                obj.parcela.nombre,
+                f"{socio.usuario.nombres} {socio.usuario.apellidos}"
+            )
+        return "—"
+    parcela_display.short_description = 'Parcela'
+
+    def validaciones_info(self, obj):
+        """Muestra información de validaciones"""
+        messages = []
+        
+        # Validar fecha con campania
+        if obj.campania and obj.fecha_labor:
+            if obj.fecha_labor < obj.campania.fecha_inicio:
+                messages.append(f"⚠️ La fecha está ANTES de la campania")
+            elif obj.fecha_labor > obj.campania.fecha_fin:
+                messages.append(f"⚠️ La fecha está DESPUÉS de la campania")
+            else:
+                messages.append("✅ Fecha dentro del rango de campania")
+        
+        # Validar estado de parcela
+        if obj.parcela:
+            if obj.parcela.estado == 'ACTIVA':
+                messages.append("✅ Parcela activa")
+            else:
+                messages.append(f"❌ Parcela {obj.parcela.get_estado_display().lower()}")
+        
+        # Validar que tenga al menos campania o parcela
+        if not obj.campania and not obj.parcela:
+            messages.append("❌ Falta campania y parcela")
+        else:
+            messages.append("✅ Tiene campania o parcela")
+        
+        return format_html("<br>".join(messages))
+    validaciones_info.short_description = 'Validaciones'
+
+    def marcar_como_completada(self, request, queryset):
+        """Acción para marcar labores como completadas"""
+        updated = queryset.update(estado='COMPLETADA')
+        self.message_user(
+            request, 
+            f'{updated} labor(es) marcada(s) como completada(s).'
+        )
+    marcar_como_completada.short_description = "Marcar como COMPLETADA"
+
+    def marcar_como_en_proceso(self, request, queryset):
+        """Acción para marcar labores como en proceso"""
+        updated = queryset.update(estado='EN_PROCESO')
+        self.message_user(
+            request, 
+            f'{updated} labor(es) marcada(s) como en proceso.'
+        )
+    marcar_como_en_proceso.short_description = "Marcar como EN PROCESO"
+
+    def marcar_como_planificada(self, request, queryset):
+        """Acción para marcar labores como planificadas"""
+        updated = queryset.update(estado='PLANIFICADA')
+        self.message_user(
+            request, 
+            f'{updated} labor(es) marcada(s) como planificada(s).'
+        )
+    marcar_como_planificada.short_description = "Marcar como PLANIFICADA"
+
+    def marcar_como_cancelada(self, request, queryset):
+        """Acción para marcar labores como canceladas"""
+        updated = queryset.update(estado='CANCELADA')
+        self.message_user(
+            request, 
+            f'{updated} labor(es) marcada(s) como cancelada(s).'
+        )
+    marcar_como_cancelada.short_description = "Marcar como CANCELADA"
+
+    def exportar_labores_csv(self, request, queryset):
+        """Exportar labores seleccionadas a CSV"""
+        import csv
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="labores_agricolas_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Labor', 'Fecha', 'Estado', 'campania', 
+            'Parcela', 'Observaciones', 'Creado'
+        ])
+
+        for labor in queryset:
+            writer.writerow([
+                labor.id,
+                labor.get_labor_display(),
+                labor.fecha_labor,
+                labor.get_estado_display(),
+                labor.campania.nombre if labor.campania else '',
+                labor.parcela.nombre if labor.parcela else '',
+                labor.observaciones or '',
+                labor.creado_en.strftime('%Y-%m-%d %H:%M')
+            ])
+
+        self.message_user(request, f'Exportadas {queryset.count()} labores a CSV.')
+        return response
+    exportar_labores_csv.short_description = "Exportar labores a CSV"
+
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'campania', 'parcela__socio__usuario'
+        ).order_by('-fecha_labor')
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        """Filtrar parcelas activas en el formulario"""
+        if db_field.name == "parcela":
+            kwargs["queryset"] = Parcela.objects.filter(estado='ACTIVA').select_related('socio__usuario')
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+@admin.register(ProductoCosechado)
+class ProductoCosechadoAdmin(admin.ModelAdmin):
+    """
+    CU15: Configuración del admin para Productos Cosechados
+    """
+    list_display = [
+        'id', 'cultivo_especie_display', 'cantidad_display', 'fecha_cosecha', 
+        'estado_badge', 'origen_display', 'lote', 'ubicacion_almacen', 'creado_en'
+    ]
+    
+    list_filter = [
+        'estado', 'fecha_cosecha', 'cultivo__especie', 'calidad',
+        'campania', 'parcela'
+    ]
+    
+    search_fields = [
+        'cultivo__especie', 'cultivo__variedad', 'lote', 
+        'ubicacion_almacen', 'calidad'
+    ]
+    
+    readonly_fields = [
+        'creado_en', 'actualizado_en', 'origen_display', 
+        'dias_en_almacen_display', 'puede_vender_display'
+    ]
+    
+    fieldsets = (
+        ('Información Principal', {
+            'fields': (
+                'fecha_cosecha', 'cantidad', 'unidad_medida', 'calidad',
+                'estado', 'lote', 'ubicacion_almacen'
+            )
+        }),
+        ('Relaciones', {
+            'fields': (
+                'cultivo', 'labor', 'campania', 'parcela'
+            )
+        }),
+        ('Información Adicional', {
+            'fields': (
+                'observaciones',
+            )
+        }),
+        ('Auditoría', {
+            'fields': (
+                'origen_display', 'dias_en_almacen_display', 
+                'puede_vender_display', 'creado_en', 'actualizado_en'
+            ),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    raw_id_fields = ['cultivo', 'labor', 'campania', 'parcela']
+    
+    date_hierarchy = 'fecha_cosecha'
+    
+    list_per_page = 25
+    
+    actions = ['marcar_como_vendido', 'marcar_como_procesado', 'marcar_como_vencido']
+    
+    def cultivo_especie_display(self, obj):
+        """Muestra la especie y variedad del cultivo"""
+        if obj.cultivo.variedad:
+            return f"{obj.cultivo.especie} - {obj.cultivo.variedad}"
+        return obj.cultivo.especie
+    cultivo_especie_display.short_description = 'Cultivo'
+    
+    def cantidad_display(self, obj):
+        """Muestra la cantidad formateada"""
+        return f"{obj.cantidad} {obj.unidad_medida}"
+    cantidad_display.short_description = 'Cantidad'
+    
+    def estado_badge(self, obj):
+        """Muestra el estado con colores"""
+        colors = {
+            'En Almacén': 'blue',
+            'Vendido': 'green', 
+            'Procesado': 'orange',
+            'Vencido': 'red',
+            'En revision': 'gray'
+        }
+        color = colors.get(obj.estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            obj.estado
+        )
+    estado_badge.short_description = 'Estado'
+    estado_badge.admin_order_field = 'estado'
+    
+    def origen_display(self, obj):
+        """Muestra el origen (campania o parcela)"""
+        return obj.origen_display
+    origen_display.short_description = 'Origen'
+    
+    def dias_en_almacen_display(self, obj):
+        """Muestra días en almacén"""
+        dias = obj.dias_en_almacen()
+        if dias > 30:
+            color = 'red'
+        elif dias > 15:
+            color = 'orange'
+        else:
+            color = 'green'
+        
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{} días</span>',
+            color,
+            dias
+        )
+    dias_en_almacen_display.short_description = 'Días en Almacén'
+    
+    def puede_vender_display(self, obj):
+        """Indica si el producto puede ser vendido"""
+        if obj.puede_vender():
+            return format_html(
+                '<span style="color: green; font-weight: bold;">✓ SÍ</span>'
+            )
+        return format_html(
+            '<span style="color: red; font-weight: bold;">✗ NO</span>'
+        )
+    puede_vender_display.short_description = 'Puede Vender'
+    
+    def marcar_como_vendido(self, request, queryset):
+        """Acción para marcar productos como vendidos"""
+        updated = queryset.update(estado='Vendido')
+        self.message_user(
+            request, 
+            f'{updated} productos marcados como vendidos.'
+        )
+    marcar_como_vendido.short_description = "Marcar seleccionados como VENDIDO"
+    
+    def marcar_como_procesado(self, request, queryset):
+        """Acción para marcar productos como procesados"""
+        updated = queryset.update(estado='Procesado')
+        self.message_user(
+            request, 
+            f'{updated} productos marcados como procesados.'
+        )
+    marcar_como_procesado.short_description = "Marcar seleccionados como PROCESADO"
+    
+    def marcar_como_vencido(self, request, queryset):
+        """Acción para marcar productos como vencidos"""
+        updated = queryset.update(estado='Vencido')
+        self.message_user(
+            request, 
+            f'{updated} productos marcados como vencidos.'
+        )
+    marcar_como_vencido.short_description = "Marcar seleccionados como VENCIDO"
+    
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'cultivo', 'labor', 'campania', 'parcela__socio__usuario'
+        )
+
+# =============================================================================
+# IMPORTAR ADMINISTRACIÓN DE campaniaS (CU9 - SPRINT 2)
+# =============================================================================
+# Se importan las clases de administración de campanias desde admin_campaigns.py
+# Esto mantiene el código organizado y modular
+from .admin_campaigns import CampaignAdmin, CampaignPartnerAdmin, CampaignPlotAdmin
+
+# Las clases ya están registradas con @admin.register en admin_campaigns.py
+# No es necesario volver a registrarlas aquí

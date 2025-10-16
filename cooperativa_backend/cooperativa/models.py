@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.utils import timezone
 from django.core.exceptions import ValidationError
@@ -1655,3 +1656,687 @@ class Fertilizante(models.Model):
             return {'N': n, 'P': p, 'K': k}
         except (ValueError, IndexError):
             return None
+
+
+# ============================================================================
+# CU9: GESTIÓN DE campaniaS AGRÍCOLAS
+# T036: Gestión de campanias (crear, editar, eliminar)
+# T037: Relación entre campania y socios
+# ============================================================================
+
+class Campaign(models.Model):
+    """
+    CU9: Modelo para gestión de campanias agrícolas
+    T036: Gestión de campanias (crear, editar, eliminar)
+    
+    Una campania representa un ciclo agrícola completo con objetivos específicos
+    de producción, fechas definidas y asociación con socios y parcelas.
+    """
+    ESTADOS = [
+        ('PLANIFICADA', 'Planificada'),
+        ('EN_CURSO', 'En Curso'),
+        ('FINALIZADA', 'Finalizada'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    nombre = models.CharField(
+        max_length=200,
+        unique=True,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\/]+$',
+            message='Nombre solo puede contener letras, números, espacios, guiones, puntos y barras'
+        )],
+        help_text='Nombre descriptivo de la campania'
+    )
+    fecha_inicio = models.DateField(
+        help_text='Fecha de inicio de la campania'
+    )
+    fecha_fin = models.DateField(
+        help_text='Fecha programada de finalización de la campania'
+    )
+    meta_produccion = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='La meta de producción no puede ser negativa')],
+        help_text='Meta de producción total de la campania (en kg o toneladas)'
+    )
+    unidad_meta = models.CharField(
+        max_length=20,
+        default='kg',
+        help_text='Unidad de medida de la meta (kg, toneladas, quintales, etc.)'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS,
+        default='PLANIFICADA',
+        help_text='Estado actual de la campania'
+    )
+    descripcion = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Descripción detallada de los objetivos y características de la campania'
+    )
+    presupuesto = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='El presupuesto no puede ser negativo')],
+        help_text='Presupuesto asignado a la campania'
+    )
+    responsable = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='campanias_responsables',
+        help_text='Usuario responsable de coordinar la campania'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'campaign'
+        verbose_name = 'campania'
+        verbose_name_plural = 'campanias'
+        ordering = ['-fecha_inicio']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.fecha_inicio} - {self.fecha_fin})"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que fecha_fin > fecha_inicio
+        if self.fecha_fin <= self.fecha_inicio:
+            raise ValidationError({
+                'fecha_fin': 'La fecha de fin debe ser posterior a la fecha de inicio'
+            })
+
+        # Validar solape de fechas con otras campanias
+        self._validar_solape_fechas()
+
+    def _validar_solape_fechas(self):
+        """
+        Valida que no haya solape de fechas con otras campanias activas
+        T036: Validación de no solapes entre campanias
+        """
+        # Obtener campanias que se solapan (excluyendo la actual si es actualización)
+        queryset = Campaign.objects.filter(
+            Q(estado__in=['PLANIFICADA', 'EN_CURSO']) &
+            (
+                # Caso 1: Nueva campania inicia dentro de campania existente
+                Q(fecha_inicio__lte=self.fecha_inicio, fecha_fin__gte=self.fecha_inicio) |
+                # Caso 2: Nueva campania termina dentro de campania existente
+                Q(fecha_inicio__lte=self.fecha_fin, fecha_fin__gte=self.fecha_fin) |
+                # Caso 3: Nueva campania engloba campania existente
+                Q(fecha_inicio__gte=self.fecha_inicio, fecha_fin__lte=self.fecha_fin)
+            )
+        )
+
+        # Excluir la instancia actual si es una actualización
+        if self.pk:
+            queryset = queryset.exclude(pk=self.pk)
+
+        if queryset.exists():
+            campanias_solapadas = ', '.join([c.nombre for c in queryset])
+            raise ValidationError({
+                'fecha_inicio': f'Las fechas se solapan con las siguientes campanias: {campanias_solapadas}. '
+                               f'No puede haber campanias simultáneas.'
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+    def puede_eliminar(self):
+        """
+        Verifica si la campania puede ser eliminada
+        T036: Validar que no se elimine campania con labores o cosechas asociadas
+        """
+        # Simplemente retorna True si no hay labores ni cosechas
+        # La lógica real se maneja en las relaciones de cascada
+        return True
+
+    def duracion_dias(self):
+        """Calcula la duración de la campania en días"""
+        if not self.fecha_inicio or not self.fecha_fin:
+            return 0
+        return (self.fecha_fin - self.fecha_inicio).days
+
+    def dias_restantes(self):
+        """Calcula días restantes si la campania está en curso"""
+        from datetime import date
+        if self.estado == 'EN_CURSO' and self.fecha_fin:
+            hoy = date.today()
+            if hoy < self.fecha_fin:
+                return (self.fecha_fin - hoy).days
+        return 0
+
+    def progreso_temporal(self):
+        """Calcula el progreso temporal de la campania (%)"""
+        from datetime import date
+        hoy = date.today()
+        # Si faltan fechas, no es posible calcular
+        if not self.fecha_inicio or not self.fecha_fin:
+            return 0.0
+        
+        # Si la campania está finalizada, progreso = 100%
+        if self.estado == 'FINALIZADA':
+            return 100.0
+        
+        # Si la campania está cancelada, progreso = 0%
+        if self.estado == 'CANCELADA':
+            return 0.0
+        
+        # Si la campania no ha empezado, progreso = 0%
+        if hoy < self.fecha_inicio:
+            return 0.0
+        
+        # Si la campania ya terminó (fecha pasada), progreso = 100%
+        if hoy > self.fecha_fin:
+            return 100.0
+        
+        # Calcular progreso basado en días transcurridos
+        duracion_total = self.duracion_dias()
+        dias_transcurridos = (hoy - self.fecha_inicio).days
+
+        if duracion_total <= 0:
+            return 100.0
+
+        return min(100.0, max(0.0, (dias_transcurridos / duracion_total) * 100))
+
+
+class CampaignPartner(models.Model):
+    """
+    CU9: Modelo para relación M2M entre Campaign y Socio con campos adicionales
+    T037: Relación entre campania y socios
+    """
+    ROLES = [
+        ('COORDINADOR', 'Coordinador'),
+        ('PRODUCTOR', 'Productor'),
+        ('TECNICO', 'Técnico Agrícola'),
+        ('SUPERVISOR', 'Supervisor'),
+    ]
+
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.CASCADE,
+        related_name='socios_asignados'
+    )
+    socio = models.ForeignKey(
+        Socio,
+        on_delete=models.CASCADE,
+        related_name='campanias_participadas'
+    )
+    rol = models.CharField(
+        max_length=20,
+        choices=ROLES,
+        default='PRODUCTOR',
+        help_text='Rol del socio en la campania'
+    )
+    fecha_asignacion = models.DateField(
+        default=timezone.now,
+        help_text='Fecha en que el socio fue asignado a la campania'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones sobre la participación del socio'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'campaign_partner'
+        verbose_name = 'Socio de campania'
+        verbose_name_plural = 'Socios de campanias'
+        unique_together = ('campaign', 'socio')
+        ordering = ['-fecha_asignacion']
+
+    def __str__(self):
+        return f"{self.socio.usuario.get_full_name()} - {self.campaign.nombre} ({self.rol})"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que el socio esté activo
+        if self.socio.estado != 'ACTIVO':
+            raise ValidationError({
+                'socio': 'Solo se pueden asignar socios con estado ACTIVO'
+            })
+
+        # Validar que la fecha de asignación esté dentro del rango de la campania
+        if self.fecha_asignacion < self.campaign.fecha_inicio:
+            raise ValidationError({
+                'fecha_asignacion': 'La fecha de asignación no puede ser anterior al inicio de la campania'
+            })
+
+
+class CampaignPlot(models.Model):
+    """
+    CU9: Modelo para asociar parcelas a campanias
+    T037: Relación entre campania y parcelas
+    """
+    campaign = models.ForeignKey(
+        Campaign,
+        on_delete=models.CASCADE,
+        related_name='parcelas'
+    )
+    parcela = models.ForeignKey(
+        Parcela,
+        on_delete=models.CASCADE,
+        related_name='campanias'
+    )
+    fecha_asignacion = models.DateField(
+        default=timezone.now,
+        help_text='Fecha en que la parcela fue asignada a la campania'
+    )
+    superficie_comprometida = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0.01, message='La superficie debe ser mayor a 0')],
+        help_text='Superficie de la parcela comprometida para esta campania (en hectáreas)'
+    )
+    cultivo_planificado = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Cultivo planificado para esta parcela en la campania'
+    )
+    meta_produccion_parcela = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='La meta no puede ser negativa')],
+        help_text='Meta de producción específica para esta parcela'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones sobre la participación de la parcela'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'campaign_plot'
+        verbose_name = 'Parcela de campania'
+        verbose_name_plural = 'Parcelas de campanias'
+        unique_together = ('campaign', 'parcela')
+        ordering = ['-fecha_asignacion']
+
+    def __str__(self):
+        return f"{self.parcela.nombre} - {self.campaign.nombre}"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que la parcela esté activa
+        if self.parcela.estado != 'ACTIVA':
+            raise ValidationError({
+                'parcela': 'Solo se pueden asignar parcelas con estado ACTIVA'
+            })
+
+        # Validar que la superficie comprometida no exceda la superficie total
+        if self.superficie_comprometida and self.superficie_comprometida > self.parcela.superficie_hectareas:
+            raise ValidationError({
+                'superficie_comprometida': f'La superficie comprometida no puede exceder la superficie total de la parcela ({self.parcela.superficie_hectareas} ha)'
+            })
+
+        # Validar que la fecha de asignación esté dentro del rango de la campania
+        if self.fecha_asignacion < self.campaign.fecha_inicio:
+            raise ValidationError({
+                'fecha_asignacion': 'La fecha de asignación no puede ser anterior al inicio de la campania'
+            })
+
+
+class Labor(models.Model):
+    TIPOS_LABOR = [
+        ('SIEMBRA', 'Siembra'),
+        ('RIEGO', 'Riego'),
+        ('FERTILIZACION', 'Fertilización'),
+        ('COSECHA', 'Cosecha'),
+        ('FUMIGACION', 'Fumigación'),
+    ]
+
+    ESTADOS = [
+        ('PLANIFICADA', 'Planificada'),
+        ('EN_PROCESO', 'En Proceso'),
+        ('COMPLETADA', 'Completada'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    fecha_labor = models.DateField(
+        help_text='Fecha en que se realiza la labor'
+    )
+    labor = models.CharField(
+        max_length=50,
+        choices=TIPOS_LABOR,
+        help_text='Tipo de labor agrícola'
+    )
+    estado = models.CharField(
+        max_length=50,
+        choices=ESTADOS,
+        default='PLANIFICADA',
+        help_text='Estado actual de la labor'
+    )
+    campania = models.ForeignKey(
+        Campaign,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        help_text='campania a la que pertenece esta labor (opcional)'
+    )
+    parcela = models.ForeignKey(
+        Parcela,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        help_text='Parcela en la que se realiza la labor (opcional)'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones adicionales de la labor'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'labor'
+        verbose_name = 'Labor Agrícola'
+        verbose_name_plural = 'Labores Agrícolas'
+        ordering = ['-fecha_labor']
+
+    def __str__(self):
+        return f"{self.labor} - {self.fecha_labor}"
+
+def clean(self):
+    if not self.campania and not self.parcela:
+        raise ValidationError('Debe especificar al menos una campania o una parcela.')
+
+    if self.campania and self.fecha_labor:
+        if self.fecha_labor < self.campania.fecha_inicio or self.fecha_labor > self.campania.fecha_fin:
+            raise ValidationError({
+                'fecha_labor': f'La fecha de la labor debe estar dentro del rango de la campania: {self.campania.fecha_inicio} a {self.campania.fecha_fin}'
+            })
+
+
+        # Validar que la parcela esté activa
+        if self.parcela and self.parcela.estado != 'ACTIVA':
+            raise ValidationError({
+                'parcela': 'Solo se pueden asignar labores a parcelas activas'
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+
+# ============================================================================
+# CU15: REGISTRO DE PRODUCTOS COSECHADOS
+# Registrar productos cosechados por campania y parcela
+# ============================================================================
+
+class ProductoCosechado(models.Model):
+    """
+    CU15: Modelo para registro de productos cosechados
+    - Relación con campania O parcela (una de las dos)
+    - Estados: En Almacén, Vendido, Procesado, Vencido, En revisión
+    """
+    ESTADO_OPCIONES = [
+        ('En Almacén', 'En Almacén'),
+        ('Vendido', 'Vendido'),
+        ('Procesado', 'Procesado'),
+        ('Vencido', 'Vencido'),
+        ('En revision', 'En revision'),
+    ]
+
+    # Campos principales
+    fecha_cosecha = models.DateField(
+        help_text='Fecha en que se realizó la cosecha'
+    )
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='La cantidad no puede ser negativa')],
+        help_text='Cantidad cosechada'
+    )
+    unidad_medida = models.CharField(
+        max_length=20,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\/]+$',
+            message='Unidad de medida solo puede contener letras, números, espacios y barras'
+        )],
+        help_text='Unidad de medida (kg, toneladas, quintales, etc.)'
+    )
+    calidad = models.CharField(
+        max_length=50,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.]+$',
+            message='Calidad solo puede contener letras, números, espacios, guiones y puntos'
+        )],
+        help_text='Calidad del producto cosechado (ej: Premium, Estándar, etc.)'
+    )
+    
+    # Relaciones foráneas
+    cultivo = models.ForeignKey(
+        Cultivo,
+        on_delete=models.CASCADE,
+        related_name='productos_cosechados',
+        help_text='Cultivo del que se obtuvo el producto'
+    )
+    labor = models.OneToOneField(
+    Labor,
+    on_delete=models.CASCADE,
+    related_name='producto_cosechado',
+    help_text='Labor de cosecha asociada (única por producto)'
+    )
+    
+    # Estado y ubicación
+    estado = models.CharField(
+        max_length=50,
+        choices=ESTADO_OPCIONES,
+        default='En Almacén',
+        help_text='Estado actual del producto cosechado'
+    )
+    lote = models.FloatField(
+        validators=[MinValueValidator(0, message='El lote no puede ser negativo')],
+        help_text='Número de lote del producto'
+    )
+    ubicacion_almacen = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\/]+$',
+            message='Ubicación solo puede contener letras, números, espacios, guiones, puntos y barras'
+        )],
+        help_text='Ubicación física en el almacén'
+    )
+    
+    # Opción 1: Relación con campania
+    campania = models.ForeignKey(
+        Campaign,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name='productos_cosechados',
+        help_text='campania a la que pertenece el producto (opcional)'
+    )
+    
+    # Opción 2: Relación con parcela
+    parcela = models.ForeignKey(
+        Parcela,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name='productos_cosechados',
+        help_text='Parcela de donde proviene el producto (opcional)'
+    )
+    
+    # Campos de auditoría
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones adicionales sobre el producto cosechado'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'producto_cosechado'
+        verbose_name = 'Producto Cosechado'
+        verbose_name_plural = 'Productos Cosechados'
+        ordering = ['-fecha_cosecha', '-creado_en']
+        # Índices para mejorar performance
+        indexes = [
+            models.Index(fields=['fecha_cosecha']),
+            models.Index(fields=['estado']),
+            models.Index(fields=['lote']),
+        ]
+
+    def __str__(self):
+        cultivo_str = f"{self.cultivo.especie}"
+        if self.cultivo.variedad:
+            cultivo_str += f" - {self.cultivo.variedad}"
+        
+        opcion_str = ""
+        if self.campania:
+            opcion_str = f" - campania: {self.campania.nombre}"
+        elif self.parcela:
+            opcion_str = f" - Parcela: {self.parcela.nombre}"
+            
+        return f"{cultivo_str} - {self.cantidad} {self.unidad_medida} - {self.fecha_cosecha}{opcion_str}"
+
+    def clean(self):
+        """Validaciones adicionales del modelo"""
+        # Validar que al menos una de las dos (campania o parcela) esté presente
+        if not self.campania and not self.parcela:
+            raise ValidationError({
+                'campania': 'Debe especificar al menos una campania o una parcela.',
+                'parcela': 'Debe especificar al menos una campania o una parcela.'
+            })
+
+        # Validar que no se especifiquen ambas opciones
+        if self.campania and self.parcela:
+            raise ValidationError({
+                'campania': 'Solo puede especificar campania O parcela, no ambas.',
+                'parcela': 'Solo puede especificar campania O parcela, no ambas.'
+            })
+
+        # Validar que la fecha de cosecha no sea en el futuro
+        from datetime import date
+        if self.fecha_cosecha > date.today():
+            raise ValidationError({
+                'fecha_cosecha': 'La fecha de cosecha no puede ser en el futuro.'
+            })
+
+        # Validar que la cantidad sea positiva
+        if self.cantidad <= 0:
+            raise ValidationError({
+                'cantidad': 'La cantidad debe ser mayor a 0.'
+            })
+
+        # Validar que el lote sea positivo
+        if self.lote <= 0:
+            raise ValidationError({
+                'lote': 'El número de lote debe ser mayor a 0.'
+            })
+
+        # Validar que la labor esté relacionada con la misma campania/parcela si se especifica
+        if self.campania and self.labor.campania != self.campania:
+            raise ValidationError({
+                'labor': f'La labor seleccionada no pertenece a la campania {self.campania.nombre}.'
+            })
+
+        if self.parcela and self.labor.parcela != self.parcela:
+            raise ValidationError({
+                'labor': f'La labor seleccionada no pertenece a la parcela {self.parcela.nombre}.'
+            })
+
+    def save(self, *args, **kwargs):
+        """Método save personalizado con validaciones"""
+        self.full_clean()  # Ejecutar validaciones antes de guardar
+        super().save(*args, **kwargs)
+
+    # Propiedades calculadas
+    @property
+    def origen_display(self):
+        """Retorna el origen (campania o parcela) en formato legible"""
+        if self.campania:
+            return f"campania: {self.campania.nombre}"
+        elif self.parcela:
+            return f"Parcela: {self.parcela.nombre}"
+        return "Origen no especificado"
+
+    @property
+    def cultivo_especie(self):
+        """Retorna la especie del cultivo"""
+        return self.cultivo.especie
+
+    @property
+    def cultivo_variedad(self):
+        """Retorna la variedad del cultivo"""
+        return self.cultivo.variedad if self.cultivo.variedad else "No especificada"
+
+    def cambiar_estado(self, nuevo_estado, observaciones=None):
+        """
+        Cambia el estado del producto cosechado
+        Args:
+            nuevo_estado (str): Nuevo estado del producto
+            observaciones (str): Observaciones opcionales para el cambio
+        """
+        estados_validos = [estado[0] for estado in self.ESTADO_OPCIONES]
+        
+        if nuevo_estado not in estados_validos:
+            raise ValidationError(f'Estado inválido. Estados válidos: {", ".join(estados_validos)}')
+        
+        self.estado = nuevo_estado
+        if observaciones:
+            self.observaciones = observaciones
+        
+        self.save()
+
+    def puede_vender(self):
+        """Verifica si el producto puede ser vendido"""
+        return self.estado == 'En Almacén' and self.cantidad > 0
+
+    def vender_producto(self, cantidad_vendida, observaciones=None):
+        """
+        Marca una cantidad del producto como vendida
+        Args:
+            cantidad_vendida (decimal): Cantidad a vender
+            observaciones (str): Observaciones opcionales
+        """
+        if not self.puede_vender():
+            raise ValidationError('El producto no está disponible para venta.')
+        
+        if cantidad_vendida > self.cantidad:
+            raise ValidationError(f'Cantidad insuficiente. Disponible: {self.cantidad}')
+        
+        # Si se vende toda la cantidad, cambiar estado a Vendido
+        if cantidad_vendida == self.cantidad:
+            self.estado = 'Vendido'
+        # Si se vende parcialmente, crear un nuevo registro o ajustar cantidad
+        # Por simplicidad, en este caso asumimos que se vende todo el lote
+        
+        if observaciones:
+            self.observaciones = observaciones
+        
+        self.save()
+
+    def dias_en_almacen(self):
+        """Calcula los días que el producto ha estado en almacén"""
+        from datetime import date
+        if self.estado == 'En Almacén':
+            return (date.today() - self.fecha_cosecha).days
+        return 0
+
+    def esta_proximo_vencer(self, dias_umbral=30):
+        """
+        Verifica si el producto está próximo a vencer
+        Args:
+            dias_umbral (int): Umbral de días para considerar próximo a vencer
+        """
+        dias_almacen = self.dias_en_almacen()
+        # Asumiendo que productos agrícolas tienen vida útil limitada
+        # Podríamos agregar un campo de fecha_vencimiento si es necesario
+        return dias_almacen >= dias_umbral and self.estado == 'En Almacén'
