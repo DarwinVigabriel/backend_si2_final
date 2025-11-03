@@ -1,9 +1,10 @@
 from django.db import models
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator, MinValueValidator, MaxValueValidator
+from decimal import Decimal
 import re
 import json
 
@@ -2340,3 +2341,1138 @@ class ProductoCosechado(models.Model):
         # Asumiendo que productos agrícolas tienen vida útil limitada
         # Podríamos agregar un campo de fecha_vencimiento si es necesario
         return dias_almacen >= dias_umbral and self.estado == 'En Almacén'
+
+
+# ============================================================================
+# SISTEMA DE PAGOS - REGISTRO Y GESTIÓN DE VENTAS
+# Como administrador quiero registrar pagos y consultar historial por fecha/cliente
+# Integración con Stripe para procesamiento de pagos
+# ============================================================================
+
+class Pedido(models.Model):
+    """
+    Modelo de Pedido - Representa una orden de compra de productos
+    """
+    ESTADOS_PEDIDO = [
+        ('PENDIENTE', 'Pendiente'),
+        ('CONFIRMADO', 'Confirmado'),
+        ('EN_PROCESO', 'En Proceso'),
+        ('COMPLETADO', 'Completado'),
+        ('CANCELADO', 'Cancelado'),
+    ]
+
+    # Cliente (puede ser un socio o un cliente externo)
+    socio = models.ForeignKey(
+        Socio,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='pedidos',
+        help_text='Socio que realiza el pedido (si aplica)'
+    )
+    cliente_nombre = models.CharField(
+        max_length=200,
+        help_text='Nombre del cliente (si no es socio)'
+    )
+    cliente_email = models.EmailField(
+        blank=True,
+        null=True,
+        help_text='Email del cliente'
+    )
+    cliente_telefono = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text='Teléfono del cliente'
+    )
+    cliente_direccion = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Dirección de entrega'
+    )
+
+    # Información del pedido
+    numero_pedido = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text='Número único de pedido (generado automáticamente)'
+    )
+    fecha_pedido = models.DateTimeField(
+        default=timezone.now,
+        help_text='Fecha y hora del pedido'
+    )
+    fecha_entrega_estimada = models.DateField(
+        blank=True,
+        null=True,
+        help_text='Fecha estimada de entrega'
+    )
+    fecha_entrega_real = models.DateField(
+        blank=True,
+        null=True,
+        help_text='Fecha real de entrega'
+    )
+
+    # Montos
+    subtotal = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0, message='El subtotal no puede ser negativo')],
+        help_text='Subtotal del pedido (sin impuestos)'
+    )
+    impuestos = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0, message='Los impuestos no pueden ser negativos')],
+        help_text='Impuestos aplicados'
+    )
+    descuento = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0, message='El descuento no puede ser negativo')],
+        help_text='Descuento aplicado'
+    )
+    total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El total no puede ser negativo')],
+        help_text='Total del pedido (subtotal + impuestos - descuento)'
+    )
+
+    # Estado y observaciones
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS_PEDIDO,
+        default='PENDIENTE',
+        help_text='Estado actual del pedido'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones del pedido'
+    )
+
+    # Auditoría
+    creado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='pedidos_creados',
+        help_text='Usuario que creó el pedido'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pedido'
+        verbose_name = 'Pedido'
+        verbose_name_plural = 'Pedidos'
+        ordering = ['-fecha_pedido']
+        indexes = [
+            models.Index(fields=['numero_pedido']),
+            models.Index(fields=['fecha_pedido']),
+            models.Index(fields=['estado']),
+        ]
+
+    def __str__(self):
+        return f"Pedido {self.numero_pedido} - {self.cliente_nombre} - Bs. {self.total}"
+
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que al menos haya cliente_nombre o socio
+        if not self.socio and not self.cliente_nombre:
+            raise ValidationError('Debe especificar un socio o un nombre de cliente')
+
+        # Validar montos
+        if self.subtotal < 0:
+            raise ValidationError({'subtotal': 'El subtotal no puede ser negativo'})
+        if self.descuento > self.subtotal:
+            raise ValidationError({'descuento': 'El descuento no puede ser mayor al subtotal'})
+
+    def save(self, *args, **kwargs):
+        """Generar número de pedido si no existe y calcular total"""
+        if not self.numero_pedido:
+            # Generar número de pedido único
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            self.numero_pedido = f"PED-{timestamp}"
+
+        # Calcular total automáticamente
+        self.total = self.subtotal + self.impuestos - self.descuento
+
+        # Si hay socio, usar su información como cliente
+        if self.socio and not self.cliente_nombre:
+            self.cliente_nombre = self.socio.usuario.get_full_name()
+            self.cliente_email = self.socio.usuario.email
+            self.cliente_telefono = self.socio.usuario.telefono
+
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def calcular_totales(self):
+        """Recalcular totales basado en los items del pedido"""
+        items = self.items.all()
+        self.subtotal = sum(item.subtotal for item in items)
+        # Impuestos por defecto 13% (Bolivia IVA)
+        self.impuestos = self.subtotal * Decimal('0.13')
+        self.total = self.subtotal + self.impuestos - self.descuento
+        self.save()
+
+    @property
+    def total_pagado(self):
+        """Calcula el total pagado de todos los pagos completados"""
+        from django.db.models import Sum
+        pagos = self.pagos.filter(estado='COMPLETADO')
+        total = pagos.aggregate(Sum('monto'))['monto__sum']
+        return total if total else Decimal('0.00')
+
+    @property
+    def saldo_pendiente(self):
+        """Calcula el saldo pendiente de pago"""
+        return self.total - self.total_pagado
+
+    @property
+    def estado_pago(self):
+        """Determina el estado del pago del pedido"""
+        total_pagado = self.total_pagado
+        if total_pagado >= self.total:
+            return 'PAGADO'
+        elif total_pagado > 0:
+            return 'PARCIAL'
+        else:
+            return 'PENDIENTE'
+
+
+class DetallePedido(models.Model):
+    """
+    Detalle de un pedido - Items individuales
+    """
+    pedido = models.ForeignKey(
+        Pedido,
+        on_delete=models.CASCADE,
+        related_name='items',
+        help_text='Pedido al que pertenece este detalle'
+    )
+    producto_cosechado = models.ForeignKey(
+        ProductoCosechado,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='detalles_pedido',
+        help_text='Producto cosechado vendido'
+    )
+    
+    # Información del producto (snapshot para histórico)
+    producto_nombre = models.CharField(
+        max_length=200,
+        help_text='Nombre del producto'
+    )
+    producto_descripcion = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Descripción del producto'
+    )
+    
+    # Cantidades y precios
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0.01, message='La cantidad debe ser mayor a 0')],
+        help_text='Cantidad del producto'
+    )
+    unidad_medida = models.CharField(
+        max_length=20,
+        default='kg',
+        help_text='Unidad de medida'
+    )
+    precio_unitario = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio unitario del producto'
+    )
+    subtotal = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El subtotal no puede ser negativo')],
+        help_text='Subtotal (cantidad * precio_unitario)'
+    )
+
+    creado_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'detalle_pedido'
+        verbose_name = 'Detalle de Pedido'
+        verbose_name_plural = 'Detalles de Pedidos'
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.producto_nombre} - {self.cantidad} {self.unidad_medida} - Bs. {self.subtotal}"
+
+    def save(self, *args, **kwargs):
+        """Calcular subtotal automáticamente"""
+        self.subtotal = self.cantidad * self.precio_unitario
+        super().save(*args, **kwargs)
+
+        # Actualizar totales del pedido
+        self.pedido.calcular_totales()
+
+
+class Pago(models.Model):
+    """
+    Modelo de Pago - Registra los pagos realizados para pedidos
+    Integración con Stripe
+    """
+    METODOS_PAGO = [
+        ('EFECTIVO', 'Efectivo'),
+        ('TRANSFERENCIA', 'Transferencia Bancaria'),
+        ('STRIPE', 'Tarjeta (Stripe)'),
+        ('QR', 'Pago QR'),
+        ('OTRO', 'Otro'),
+    ]
+
+    ESTADOS_PAGO = [
+        ('PENDIENTE', 'Pendiente'),
+        ('PROCESANDO', 'Procesando'),
+        ('COMPLETADO', 'Completado'),
+        ('FALLIDO', 'Fallido'),
+        ('REEMBOLSADO', 'Reembolsado'),
+        ('CANCELADO', 'Cancelado'),
+    ]
+
+    # Relación con pedido
+    pedido = models.ForeignKey(
+        Pedido,
+        on_delete=models.CASCADE,
+        related_name='pagos',
+        help_text='Pedido al que corresponde este pago'
+    )
+
+    # Información del pago
+    numero_recibo = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text='Número único de recibo (generado automáticamente)'
+    )
+    fecha_pago = models.DateTimeField(
+        default=timezone.now,
+        help_text='Fecha y hora del pago'
+    )
+    monto = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0.01, message='El monto debe ser mayor a 0')],
+        help_text='Monto pagado'
+    )
+    metodo_pago = models.CharField(
+        max_length=20,
+        choices=METODOS_PAGO,
+        help_text='Método de pago utilizado'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS_PAGO,
+        default='PENDIENTE',
+        help_text='Estado del pago'
+    )
+
+    # Información de Stripe
+    stripe_payment_intent_id = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        unique=True,
+        help_text='ID del Payment Intent de Stripe'
+    )
+    stripe_charge_id = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        help_text='ID del Charge de Stripe'
+    )
+    stripe_customer_id = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        help_text='ID del Cliente en Stripe'
+    )
+
+    # Información adicional
+    referencia_bancaria = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Referencia bancaria (para transferencias)'
+    )
+    banco = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Nombre del banco (para transferencias)'
+    )
+    comprobante_archivo = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text='URL o path del comprobante de pago'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones del pago'
+    )
+
+    # Auditoría
+    procesado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='pagos_procesados',
+        help_text='Usuario que procesó el pago'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pago'
+        verbose_name = 'Pago'
+        verbose_name_plural = 'Pagos'
+        ordering = ['-fecha_pago']
+        indexes = [
+            models.Index(fields=['numero_recibo']),
+            models.Index(fields=['fecha_pago']),
+            models.Index(fields=['estado']),
+            models.Index(fields=['metodo_pago']),
+            models.Index(fields=['stripe_payment_intent_id']),
+        ]
+
+    def __str__(self):
+        return f"Pago {self.numero_recibo} - Bs. {self.monto} - {self.get_metodo_pago_display()}"
+
+    def save(self, *args, **kwargs):
+        """Generar número de recibo si no existe"""
+        if not self.numero_recibo:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            self.numero_recibo = f"REC-{timestamp}"
+
+        super().save(*args, **kwargs)
+
+        # Si el pago está completado, actualizar estado del pedido
+        if self.estado == 'COMPLETADO':
+            total_pagado = self.pedido.pagos.filter(estado='COMPLETADO').aggregate(
+                total=Sum('monto')
+            )['total'] or Decimal('0')
+
+            if total_pagado >= self.pedido.total:
+                self.pedido.estado = 'COMPLETADO'
+                self.pedido.save()
+
+    def procesar_pago_stripe(self, payment_method_id):
+        """
+        Procesar pago con Stripe
+        Nota: Requiere configuración de Stripe en settings.py
+        """
+        try:
+            import stripe
+            from django.conf import settings
+            
+            stripe.api_key = settings.STRIPE_SECRET_KEY
+
+            # Crear Payment Intent
+            payment_intent = stripe.PaymentIntent.create(
+                amount=int(self.monto * 100),  # Stripe usa centavos
+                currency='bob',  # Bolivianos
+                payment_method=payment_method_id,
+                confirm=True,
+                description=f'Pedido {self.pedido.numero_pedido}',
+                metadata={
+                    'pedido_id': str(self.pedido.id),
+                    'pedido_numero': self.pedido.numero_pedido,
+                }
+            )
+
+            # Guardar información de Stripe
+            self.stripe_payment_intent_id = payment_intent.id
+            if payment_intent.charges.data:
+                self.stripe_charge_id = payment_intent.charges.data[0].id
+            
+            # Actualizar estado según respuesta
+            if payment_intent.status == 'succeeded':
+                self.estado = 'COMPLETADO'
+            elif payment_intent.status == 'processing':
+                self.estado = 'PROCESANDO'
+            else:
+                self.estado = 'FALLIDO'
+
+            self.save()
+            return True, payment_intent
+
+        except Exception as e:
+            self.estado = 'FALLIDO'
+            self.observaciones = f"Error al procesar pago: {str(e)}"
+            self.save()
+            return False, str(e)
+
+    def reembolsar(self, razon=None):
+        """
+        Reembolsar pago (solo para pagos con Stripe)
+        """
+        if self.metodo_pago != 'STRIPE' or not self.stripe_charge_id:
+            raise ValidationError('Solo se pueden reembolsar pagos procesados con Stripe')
+
+        if self.estado != 'COMPLETADO':
+            raise ValidationError('Solo se pueden reembolsar pagos completados')
+
+        try:
+            import stripe
+            from django.conf import settings
+            
+            stripe.api_key = settings.STRIPE_SECRET_KEY
+
+            # Crear reembolso
+            refund = stripe.Refund.create(
+                charge=self.stripe_charge_id,
+                reason='requested_by_customer' if not razon else 'other',
+            )
+
+            if refund.status == 'succeeded':
+                self.estado = 'REEMBOLSADO'
+                if razon:
+                    self.observaciones = f"Reembolsado. Razón: {razon}"
+                self.save()
+                return True, refund
+
+        except Exception as e:
+            raise ValidationError(f'Error al reembolsar: {str(e)}')
+
+
+# ============================================================================
+# SISTEMA DE VENTAS DE INSUMOS A SOCIOS
+# Módulo de Ventas: Registro de solicitud de semillas, pesticidas y fertilizantes
+# que necesite un socio. Control de precios por temporada.
+# ============================================================================
+
+class PrecioTemporada(models.Model):
+    """
+    Control de precios de insumos por temporada
+    Permite definir precios diferentes según la época del año
+    """
+    TIPO_INSUMO = [
+        ('SEMILLA', 'Semilla'),
+        ('PESTICIDA', 'Pesticida'),
+        ('FERTILIZANTE', 'Fertilizante'),
+    ]
+    
+    TEMPORADAS = [
+        ('VERANO', 'Verano'),
+        ('INVIERNO', 'Invierno'),
+        ('PRIMAVERA', 'Primavera'),
+        ('OTOÑO', 'Otoño'),
+    ]
+    
+    # Tipo de insumo
+    tipo_insumo = models.CharField(
+        max_length=20,
+        choices=TIPO_INSUMO,
+        help_text='Tipo de insumo'
+    )
+    
+    # Relación polimórfica con el insumo específico
+    semilla = models.ForeignKey(
+        Semilla,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name='precios_temporada',
+        help_text='Semilla (si aplica)'
+    )
+    pesticida = models.ForeignKey(
+        Pesticida,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name='precios_temporada',
+        help_text='Pesticida (si aplica)'
+    )
+    fertilizante = models.ForeignKey(
+        Fertilizante,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name='precios_temporada',
+        help_text='Fertilizante (si aplica)'
+    )
+    
+    # Temporada y precios
+    temporada = models.CharField(
+        max_length=20,
+        choices=TEMPORADAS,
+        help_text='Temporada del año'
+    )
+    fecha_inicio = models.DateField(
+        help_text='Fecha de inicio de la temporada'
+    )
+    fecha_fin = models.DateField(
+        help_text='Fecha de fin de la temporada'
+    )
+    precio_venta = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio de venta por unidad'
+    )
+    precio_mayoreo = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio de mayoreo (opcional)'
+    )
+    cantidad_minima_mayoreo = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0, message='La cantidad no puede ser negativa')],
+        help_text='Cantidad mínima para precio de mayoreo'
+    )
+    
+    # Estado
+    activo = models.BooleanField(
+        default=True,
+        help_text='Si el precio está activo'
+    )
+    
+    # Auditoría
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'precio_temporada'
+        verbose_name = 'Precio por Temporada'
+        verbose_name_plural = 'Precios por Temporada'
+        ordering = ['-fecha_inicio']
+        indexes = [
+            models.Index(fields=['tipo_insumo', 'temporada']),
+            models.Index(fields=['fecha_inicio', 'fecha_fin']),
+        ]
+    
+    def __str__(self):
+        insumo_nombre = "Sin insumo"
+        if self.semilla:
+            insumo_nombre = f"{self.semilla.especie}"
+        elif self.pesticida:
+            insumo_nombre = f"{self.pesticida.nombre_comercial}"
+        elif self.fertilizante:
+            insumo_nombre = f"{self.fertilizante.nombre_comercial}"
+        
+        return f"{insumo_nombre} - {self.get_temporada_display()} - Bs. {self.precio_venta}"
+    
+    def clean(self):
+        """Validaciones del modelo"""
+        # Validar que al menos uno de los insumos esté definido
+        if not any([self.semilla, self.pesticida, self.fertilizante]):
+            raise ValidationError('Debe especificar un insumo (semilla, pesticida o fertilizante)')
+        
+        # Validar que solo uno esté definido
+        insumos_definidos = sum([
+            bool(self.semilla),
+            bool(self.pesticida),
+            bool(self.fertilizante)
+        ])
+        if insumos_definidos > 1:
+            raise ValidationError('Solo puede especificar un tipo de insumo')
+        
+        # Validar fechas
+        if self.fecha_inicio >= self.fecha_fin:
+            raise ValidationError({'fecha_fin': 'La fecha fin debe ser posterior a la fecha inicio'})
+        
+        # Validar precio mayoreo
+        if self.precio_mayoreo and not self.cantidad_minima_mayoreo:
+            raise ValidationError({
+                'cantidad_minima_mayoreo': 'Debe especificar la cantidad mínima para precio de mayoreo'
+            })
+    
+    def esta_vigente(self):
+        """Verifica si el precio está vigente en la fecha actual"""
+        from datetime import date
+        hoy = date.today()
+        return self.activo and self.fecha_inicio <= hoy <= self.fecha_fin
+    
+    def obtener_precio(self, cantidad):
+        """Obtiene el precio según la cantidad (normal o mayoreo)"""
+        if (self.precio_mayoreo and self.cantidad_minima_mayoreo and 
+            cantidad >= self.cantidad_minima_mayoreo):
+            return self.precio_mayoreo
+        return self.precio_venta
+
+
+class PedidoInsumo(models.Model):
+    """
+    Pedido de Insumos - Solicitud de un socio para comprar insumos
+    (semillas, pesticidas, fertilizantes)
+    """
+    ESTADOS_PEDIDO = [
+        ('SOLICITADO', 'Solicitado'),
+        ('APROBADO', 'Aprobado'),
+        ('EN_PREPARACION', 'En Preparación'),
+        ('LISTO_ENTREGA', 'Listo para Entrega'),
+        ('ENTREGADO', 'Entregado'),
+        ('CANCELADO', 'Cancelado'),
+    ]
+    
+    # Relación con socio
+    socio = models.ForeignKey(
+        Socio,
+        on_delete=models.PROTECT,
+        related_name='pedidos_insumos',
+        help_text='Socio que solicita los insumos'
+    )
+    
+    # Información del pedido
+    numero_pedido = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text='Número único de pedido (generado automáticamente)'
+    )
+    fecha_pedido = models.DateTimeField(
+        default=timezone.now,
+        help_text='Fecha y hora del pedido'
+    )
+    fecha_entrega_solicitada = models.DateField(
+        blank=True,
+        null=True,
+        help_text='Fecha en que el socio necesita los insumos'
+    )
+    fecha_entrega_real = models.DateField(
+        blank=True,
+        null=True,
+        help_text='Fecha real de entrega'
+    )
+    
+    # Montos
+    subtotal = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0, message='El subtotal no puede ser negativo')],
+        help_text='Subtotal del pedido'
+    )
+    descuento = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0, message='El descuento no puede ser negativo')],
+        help_text='Descuento aplicado'
+    )
+    total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El total no puede ser negativo')],
+        help_text='Total del pedido (subtotal - descuento)'
+    )
+    
+    # Estado y observaciones
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS_PEDIDO,
+        default='SOLICITADO',
+        help_text='Estado actual del pedido'
+    )
+    motivo_solicitud = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Motivo o justificación de la solicitud'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones generales'
+    )
+    
+    # Auditoría
+    aprobado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='pedidos_insumos_aprobados',
+        help_text='Usuario que aprobó el pedido'
+    )
+    fecha_aprobacion = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text='Fecha de aprobación'
+    )
+    entregado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='pedidos_insumos_entregados',
+        help_text='Usuario que realizó la entrega'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'pedido_insumo'
+        verbose_name = 'Pedido de Insumo'
+        verbose_name_plural = 'Pedidos de Insumos'
+        ordering = ['-fecha_pedido']
+        indexes = [
+            models.Index(fields=['numero_pedido']),
+            models.Index(fields=['socio', 'estado']),
+            models.Index(fields=['fecha_pedido']),
+        ]
+    
+    def __str__(self):
+        return f"Pedido {self.numero_pedido} - {self.socio.usuario.get_full_name()} - Bs. {self.total}"
+    
+    def save(self, *args, **kwargs):
+        """Generar número de pedido si no existe y calcular total"""
+        if not self.numero_pedido:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            self.numero_pedido = f"INS-{timestamp}"
+        
+        # Calcular total
+        self.total = self.subtotal - self.descuento
+        
+        super().save(*args, **kwargs)
+    
+    def calcular_totales(self):
+        """Recalcular totales basado en los items"""
+        items = self.items.all()
+        self.subtotal = sum(item.subtotal for item in items)
+        self.total = self.subtotal - self.descuento
+        self.save()
+    
+    @property
+    def total_pagado(self):
+        """Calcula el total pagado de todos los pagos completados"""
+        pagos = self.pagos_insumo.filter(estado='COMPLETADO')
+        total = pagos.aggregate(Sum('monto'))['monto__sum']
+        return total if total else Decimal('0.00')
+    
+    @property
+    def saldo_pendiente(self):
+        """Calcula el saldo pendiente de pago"""
+        return self.total - self.total_pagado
+    
+    @property
+    def estado_pago(self):
+        """Determina el estado del pago del pedido"""
+        total_pagado = self.total_pagado
+        if total_pagado >= self.total:
+            return 'PAGADO'
+        elif total_pagado > 0:
+            return 'PARCIAL'
+        else:
+            return 'PENDIENTE'
+    
+    def aprobar(self, usuario):
+        """Aprobar el pedido"""
+        if self.estado != 'SOLICITADO':
+            raise ValidationError('Solo se pueden aprobar pedidos en estado SOLICITADO')
+        
+        self.estado = 'APROBADO'
+        self.aprobado_por = usuario
+        self.fecha_aprobacion = timezone.now()
+        self.save()
+    
+    def marcar_entregado(self, usuario):
+        """Marcar pedido como entregado"""
+        if self.estado not in ['APROBADO', 'EN_PREPARACION', 'LISTO_ENTREGA']:
+            raise ValidationError('El pedido debe estar aprobado para marcarlo como entregado')
+        
+        self.estado = 'ENTREGADO'
+        self.entregado_por = usuario
+        self.fecha_entrega_real = timezone.now().date()
+        self.save()
+
+
+class DetallePedidoInsumo(models.Model):
+    """
+    Detalle de Pedido de Insumo - Items individuales del pedido
+    """
+    TIPO_INSUMO = [
+        ('SEMILLA', 'Semilla'),
+        ('PESTICIDA', 'Pesticida'),
+        ('FERTILIZANTE', 'Fertilizante'),
+    ]
+    
+    # Relación con pedido
+    pedido_insumo = models.ForeignKey(
+        PedidoInsumo,
+        on_delete=models.CASCADE,
+        related_name='items',
+        help_text='Pedido al que pertenece este detalle'
+    )
+    
+    # Tipo de insumo
+    tipo_insumo = models.CharField(
+        max_length=20,
+        choices=TIPO_INSUMO,
+        help_text='Tipo de insumo'
+    )
+    
+    # Relación con el insumo específico
+    semilla = models.ForeignKey(
+        Semilla,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='detalles_pedido',
+        help_text='Semilla solicitada'
+    )
+    pesticida = models.ForeignKey(
+        Pesticida,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='detalles_pedido',
+        help_text='Pesticida solicitado'
+    )
+    fertilizante = models.ForeignKey(
+        Fertilizante,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='detalles_pedido',
+        help_text='Fertilizante solicitado'
+    )
+    
+    # Snapshot del insumo (para histórico)
+    insumo_nombre = models.CharField(
+        max_length=200,
+        help_text='Nombre del insumo (snapshot)'
+    )
+    insumo_descripcion = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Descripción del insumo'
+    )
+    
+    # Cantidades y precios
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0.01, message='La cantidad debe ser mayor a 0')],
+        help_text='Cantidad solicitada'
+    )
+    unidad_medida = models.CharField(
+        max_length=20,
+        help_text='Unidad de medida'
+    )
+    precio_unitario = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El precio no puede ser negativo')],
+        help_text='Precio unitario al momento del pedido'
+    )
+    subtotal = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message='El subtotal no puede ser negativo')],
+        help_text='Subtotal (cantidad * precio_unitario)'
+    )
+    
+    # Información adicional
+    temporada_aplicada = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text='Temporada del precio aplicado'
+    )
+    
+    creado_en = models.DateTimeField(default=timezone.now)
+    
+    class Meta:
+        db_table = 'detalle_pedido_insumo'
+        verbose_name = 'Detalle de Pedido de Insumo'
+        verbose_name_plural = 'Detalles de Pedidos de Insumos'
+        ordering = ['id']
+    
+    def __str__(self):
+        return f"{self.insumo_nombre} - {self.cantidad} {self.unidad_medida} - Bs. {self.subtotal}"
+    
+    def clean(self):
+        """Validaciones"""
+        # Validar que al menos uno de los insumos esté definido
+        if not any([self.semilla, self.pesticida, self.fertilizante]):
+            raise ValidationError('Debe especificar un insumo')
+        
+        # Validar que solo uno esté definido
+        insumos_definidos = sum([
+            bool(self.semilla),
+            bool(self.pesticida),
+            bool(self.fertilizante)
+        ])
+        if insumos_definidos > 1:
+            raise ValidationError('Solo puede especificar un tipo de insumo')
+    
+    def save(self, *args, **kwargs):
+        """Calcular subtotal y guardar snapshot del insumo"""
+        # Calcular subtotal
+        self.subtotal = self.cantidad * self.precio_unitario
+        
+        # Guardar snapshot del insumo si no existe
+        if not self.insumo_nombre:
+            if self.semilla:
+                self.insumo_nombre = f"{self.semilla.especie} - {self.semilla.variedad or ''}"
+                self.insumo_descripcion = f"Lote: {self.semilla.lote or 'N/A'}"
+                self.unidad_medida = self.semilla.unidad_medida
+            elif self.pesticida:
+                self.insumo_nombre = self.pesticida.nombre_comercial
+                self.insumo_descripcion = f"Ingrediente activo: {self.pesticida.ingrediente_activo}"
+                self.unidad_medida = self.pesticida.unidad_medida
+            elif self.fertilizante:
+                self.insumo_nombre = self.fertilizante.nombre_comercial
+                self.insumo_descripcion = f"NPK: {self.fertilizante.composicion_npk or 'N/A'}"
+                self.unidad_medida = self.fertilizante.unidad_medida
+        
+        super().save(*args, **kwargs)
+        
+        # Actualizar totales del pedido
+        self.pedido_insumo.calcular_totales()
+
+
+class PagoInsumo(models.Model):
+    """
+    Pago de Insumo - Registro de pagos del socio por insumos solicitados
+    """
+    METODOS_PAGO = [
+        ('EFECTIVO', 'Efectivo'),
+        ('TRANSFERENCIA', 'Transferencia Bancaria'),
+        ('DESCUENTO_PRODUCCION', 'Descuento de Producción'),
+        ('CREDITO', 'Crédito'),
+        ('OTRO', 'Otro'),
+    ]
+    
+    ESTADOS_PAGO = [
+        ('PENDIENTE', 'Pendiente'),
+        ('COMPLETADO', 'Completado'),
+        ('PARCIAL', 'Parcial'),
+        ('CANCELADO', 'Cancelado'),
+    ]
+    
+    # Relación con pedido
+    pedido_insumo = models.ForeignKey(
+        PedidoInsumo,
+        on_delete=models.CASCADE,
+        related_name='pagos_insumo',
+        help_text='Pedido al que corresponde este pago'
+    )
+    
+    # Información del pago
+    numero_recibo = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text='Número único de recibo'
+    )
+    fecha_pago = models.DateTimeField(
+        default=timezone.now,
+        help_text='Fecha y hora del pago'
+    )
+    monto = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0.01, message='El monto debe ser mayor a 0')],
+        help_text='Monto pagado'
+    )
+    metodo_pago = models.CharField(
+        max_length=30,
+        choices=METODOS_PAGO,
+        help_text='Método de pago utilizado'
+    )
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADOS_PAGO,
+        default='PENDIENTE',
+        help_text='Estado del pago'
+    )
+    
+    # Información adicional
+    referencia_bancaria = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Referencia bancaria (para transferencias)'
+    )
+    banco = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Nombre del banco'
+    )
+    comprobante_archivo = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text='URL o path del comprobante'
+    )
+    observaciones = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Observaciones del pago'
+    )
+    
+    # Auditoría
+    registrado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='pagos_insumo_registrados',
+        help_text='Usuario que registró el pago'
+    )
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'pago_insumo'
+        verbose_name = 'Pago de Insumo'
+        verbose_name_plural = 'Pagos de Insumos'
+        ordering = ['-fecha_pago']
+        indexes = [
+            models.Index(fields=['numero_recibo']),
+            models.Index(fields=['pedido_insumo', 'estado']),
+            models.Index(fields=['fecha_pago']),
+        ]
+    
+    def __str__(self):
+        return f"Pago {self.numero_recibo} - Bs. {self.monto} - {self.get_metodo_pago_display()}"
+    
+    def save(self, *args, **kwargs):
+        """Generar número de recibo si no existe"""
+        if not self.numero_recibo:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            self.numero_recibo = f"PGINS-{timestamp}"
+        
+        # Auto-completar pagos en efectivo
+        if self.metodo_pago == 'EFECTIVO' and self.estado == 'PENDIENTE':
+            self.estado = 'COMPLETADO'
+        
+        super().save(*args, **kwargs)
+    
+    def clean(self):
+        """Validaciones"""
+        # Validar que el pedido no esté cancelado
+        if self.pedido_insumo.estado == 'CANCELADO':
+            raise ValidationError('No se puede registrar un pago para un pedido cancelado')
+        
+        # Validar que el monto no exceda el saldo pendiente
+        if self.pk is None:  # Solo para pagos nuevos
+            saldo_pendiente = self.pedido_insumo.saldo_pendiente
+            if self.monto > saldo_pendiente:
+                raise ValidationError(
+                    f'El monto ({self.monto}) excede el saldo pendiente ({saldo_pendiente})'
+                )

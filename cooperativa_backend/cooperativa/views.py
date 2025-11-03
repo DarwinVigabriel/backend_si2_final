@@ -15,11 +15,15 @@ from django.db.models import Q, Count, Sum, Avg, F, Case, When, DecimalField
 from django.db.models.functions import TruncMonth
 from django.contrib.sessions.models import Session
 from decimal import Decimal
+import csv
+from datetime import datetime, timedelta
 from .models import (
     Rol, Usuario, UsuarioRol, Comunidad, Socio,
     Parcela, Cultivo, BitacoraAuditoria,
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
-    Semilla, Pesticida, Fertilizante, Labor, ProductoCosechado
+    Semilla, Pesticida, Fertilizante, Labor, ProductoCosechado,
+    Pedido, DetallePedido, Pago,
+    PrecioTemporada, PedidoInsumo, DetallePedidoInsumo, PagoInsumo
 )
 from .models import Campaign, CampaignPartner, CampaignPlot
 from .serializers import (
@@ -30,7 +34,9 @@ from .serializers import (
     CosechaSerializer, TratamientoSerializer, AnalisisSueloSerializer,
     TransferenciaParcelaSerializer, SemillaSerializer, PesticidaSerializer, FertilizanteSerializer,
     CampaignSerializer, CampaignListSerializer, LaborSerializer, LaborListSerializer, LaborCreateSerializer, LaborUpdateSerializer, ProductoCosechadoSerializer, ProductoCosechadoListSerializer,
-    ProductoCosechadoCambiarEstadoSerializer, ProductoCosechadoCreateSerializer, ProductoCosechadoUpdateSerializer, ProductoCosechadoVenderSerializer
+    ProductoCosechadoCambiarEstadoSerializer, ProductoCosechadoCreateSerializer, ProductoCosechadoUpdateSerializer, ProductoCosechadoVenderSerializer,
+    PedidoSerializer, PedidoCreateSerializer, PagoSerializer, PagoCreateSerializer, PagoStripeSerializer, HistorialVentasSerializer, DetallePedidoSerializer,
+    PrecioTemporadaSerializer, PedidoInsumoSerializer, PedidoInsumoCreateSerializer, DetallePedidoInsumoSerializer, PagoInsumoSerializer, HistorialComprasInsumosSerializer
 )
 from .reports import CampaignReports
 
@@ -4929,4 +4935,680 @@ def reporte_productos_cosechados_por_periodo(request):
         'productos_por_campania': list(productos_por_campania),
         'productos_por_parcela': list(productos_por_parcela),
         'evolucion_mensual': list(evolucion_mensual)
+    })
+
+
+# ============================================================================
+# SISTEMA DE PAGOS - ViewSets y Endpoints
+# ============================================================================
+
+class PedidoViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet para gestión de pedidos/órdenes
+    Permite crear, listar, actualizar y consultar pedidos
+    """
+    queryset = Pedido.objects.select_related('socio__usuario').prefetch_related('items')
+    serializer_class = PedidoSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PedidoCreateSerializer
+        return PedidoSerializer
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        # Si no es admin, solo ver sus propios pedidos
+        if not user.is_staff:
+            try:
+                socio = Socio.objects.get(usuario=user)
+                queryset = queryset.filter(socio=socio)
+            except Socio.DoesNotExist:
+                queryset = queryset.none()
+        
+        # Filtros
+        socio_id = self.request.query_params.get('socio_id')
+        estado = self.request.query_params.get('estado')
+        fecha_desde = self.request.query_params.get('fecha_desde')
+        fecha_hasta = self.request.query_params.get('fecha_hasta')
+        cliente_nombre = self.request.query_params.get('cliente_nombre')
+        
+        if socio_id:
+            queryset = queryset.filter(socio_id=socio_id)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if fecha_desde:
+            queryset = queryset.filter(fecha_pedido__gte=fecha_desde)
+        if fecha_hasta:
+            queryset = queryset.filter(fecha_pedido__lte=fecha_hasta)
+        if cliente_nombre:
+            queryset = queryset.filter(cliente_nombre__icontains=cliente_nombre)
+        
+        return queryset.order_by('-fecha_pedido')
+    
+    def perform_create(self, serializer):
+        """Crear pedido y registrar en bitácora"""
+        pedido = serializer.save()
+        
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR_PEDIDO',
+            tabla_afectada='Pedido',
+            registro_id=pedido.id,
+            detalles={
+                'numero_pedido': pedido.numero_pedido,
+                'cliente': pedido.cliente_nombre,
+                'total': str(pedido.total),
+                'creado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+    
+    def perform_update(self, serializer):
+        """Actualizar pedido y registrar en bitácora"""
+        pedido = serializer.save()
+        
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR_PEDIDO',
+            tabla_afectada='Pedido',
+            registro_id=pedido.id,
+            detalles={
+                'numero_pedido': pedido.numero_pedido,
+                'estado': pedido.estado,
+                'actualizado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+    
+    @action(detail=True, methods=['post'])
+    def cambiar_estado(self, request, pk=None):
+        """
+        Cambiar estado del pedido
+        POST /api/pedidos/{id}/cambiar_estado/
+        Body: {"estado": "CONFIRMADO|EN_PROCESO|COMPLETADO|CANCELADO"}
+        """
+        pedido = self.get_object()
+        nuevo_estado = request.data.get('estado')
+        
+        estados_validos = ['PENDIENTE', 'CONFIRMADO', 'EN_PROCESO', 'COMPLETADO', 'CANCELADO']
+        if nuevo_estado not in estados_validos:
+            return Response(
+                {'error': f'Estado inválido. Debe ser uno de: {", ".join(estados_validos)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # No permitir cambiar estado de pedidos cancelados
+        if pedido.estado == 'CANCELADO' and nuevo_estado != 'CANCELADO':
+            return Response(
+                {'error': 'No se puede cambiar el estado de un pedido cancelado'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        estado_anterior = pedido.estado
+        pedido.estado = nuevo_estado
+        pedido.save()
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='CAMBIAR_ESTADO_PEDIDO',
+            tabla_afectada='Pedido',
+            registro_id=pedido.id,
+            detalles={
+                'numero_pedido': pedido.numero_pedido,
+                'estado_anterior': estado_anterior,
+                'estado_nuevo': nuevo_estado,
+                'usuario': request.user.usuario
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        serializer = self.get_serializer(pedido)
+        return Response({
+            'mensaje': f'Estado del pedido actualizado de {estado_anterior} a {nuevo_estado}',
+            'pedido': serializer.data
+        })
+
+
+class PagoViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet para gestión de pagos
+    Permite registrar pagos y consultar historial
+    """
+    queryset = Pago.objects.select_related('pedido__socio__usuario', 'registrado_por')
+    serializer_class = PagoSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PagoCreateSerializer
+        elif self.action == 'pagar_con_stripe':
+            return PagoStripeSerializer
+        return PagoSerializer
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        # Si no es admin, solo ver pagos de sus propios pedidos
+        if not user.is_staff:
+            try:
+                socio = Socio.objects.get(usuario=user)
+                queryset = queryset.filter(pedido__socio=socio)
+            except Socio.DoesNotExist:
+                queryset = queryset.none()
+        
+        # Filtros
+        pedido_id = self.request.query_params.get('pedido_id')
+        estado = self.request.query_params.get('estado')
+        metodo_pago = self.request.query_params.get('metodo_pago')
+        fecha_desde = self.request.query_params.get('fecha_desde')
+        fecha_hasta = self.request.query_params.get('fecha_hasta')
+        
+        if pedido_id:
+            queryset = queryset.filter(pedido_id=pedido_id)
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if metodo_pago:
+            queryset = queryset.filter(metodo_pago=metodo_pago)
+        if fecha_desde:
+            queryset = queryset.filter(fecha_pago__gte=fecha_desde)
+        if fecha_hasta:
+            queryset = queryset.filter(fecha_pago__lte=fecha_hasta)
+        
+        return queryset.order_by('-fecha_pago')
+    
+    def perform_create(self, serializer):
+        """Crear pago y registrar en bitácora"""
+        pago = serializer.save(registrado_por=self.request.user)
+        
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='REGISTRAR_PAGO',
+            tabla_afectada='Pago',
+            registro_id=pago.id,
+            detalles={
+                'pedido': pago.pedido.numero_pedido,
+                'monto': str(pago.monto),
+                'metodo_pago': pago.metodo_pago,
+                'registrado_por': self.request.user.usuario
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+    
+    @action(detail=False, methods=['post'])
+    def pagar_con_stripe(self, request):
+        """
+        Procesar pago con Stripe
+        POST /api/pagos/pagar_con_stripe/
+        Body: {
+            "pedido_id": 1,
+            "monto": "100.00",
+            "payment_method_id": "pm_xxx",
+            "comprobante": "RECIBO-001"
+        }
+        """
+        serializer = PagoStripeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        pedido_id = serializer.validated_data['pedido_id']
+        monto = serializer.validated_data['monto']
+        payment_method_id = serializer.validated_data['payment_method_id']
+        comprobante = serializer.validated_data.get('comprobante', '')
+        
+        try:
+            pedido = Pedido.objects.get(id=pedido_id)
+        except Pedido.DoesNotExist:
+            return Response(
+                {'error': 'Pedido no encontrado'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Verificar permisos
+        if not request.user.is_staff:
+            try:
+                socio = Socio.objects.get(usuario=request.user)
+                if pedido.socio != socio:
+                    return Response(
+                        {'error': 'No tiene permisos para pagar este pedido'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            except Socio.DoesNotExist:
+                return Response(
+                    {'error': 'Usuario no asociado a un socio'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        # Crear pago pendiente
+        pago = Pago.objects.create(
+            pedido=pedido,
+            monto=monto,
+            metodo_pago='STRIPE',
+            comprobante=comprobante,
+            estado='PROCESANDO',
+            registrado_por=request.user
+        )
+        
+        # Procesar con Stripe
+        exito, mensaje = pago.procesar_pago_stripe(payment_method_id)
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='PAGO_STRIPE_' + ('EXITOSO' if exito else 'FALLIDO'),
+            tabla_afectada='Pago',
+            registro_id=pago.id,
+            detalles={
+                'pedido': pedido.numero_pedido,
+                'monto': str(monto),
+                'exito': exito,
+                'mensaje': mensaje,
+                'payment_method_id': payment_method_id
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        if exito:
+            serializer = PagoSerializer(pago)
+            return Response({
+                'mensaje': 'Pago procesado exitosamente',
+                'pago': serializer.data
+            }, status=status.HTTP_201_CREATED)
+        else:
+            return Response(
+                {'error': mensaje},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=True, methods=['post'])
+    def reembolsar(self, request, pk=None):
+        """
+        Reembolsar pago de Stripe
+        POST /api/pagos/{id}/reembolsar/
+        Body: {"motivo": "Descripción del motivo"}
+        """
+        pago = self.get_object()
+        motivo = request.data.get('motivo', 'Reembolso solicitado')
+        
+        if pago.metodo_pago != 'STRIPE':
+            return Response(
+                {'error': 'Solo se pueden reembolsar pagos de Stripe'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if pago.estado != 'COMPLETADO':
+            return Response(
+                {'error': 'Solo se pueden reembolsar pagos completados'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Procesar reembolso
+        exito, mensaje = pago.reembolsar(motivo)
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='REEMBOLSO_' + ('EXITOSO' if exito else 'FALLIDO'),
+            tabla_afectada='Pago',
+            registro_id=pago.id,
+            detalles={
+                'pedido': pago.pedido.numero_pedido,
+                'monto': str(pago.monto),
+                'motivo': motivo,
+                'exito': exito,
+                'mensaje': mensaje
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        if exito:
+            serializer = self.get_serializer(pago)
+            return Response({
+                'mensaje': 'Reembolso procesado exitosamente',
+                'pago': serializer.data
+            })
+        else:
+            return Response(
+                {'error': mensaje},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def historial_ventas(request):
+    """
+    Consultar historial de ventas con filtros
+    GET /api/historial-ventas/?fecha_desde=YYYY-MM-DD&fecha_hasta=YYYY-MM-DD&cliente_nombre=...&socio_id=...
+    """
+    # Validar filtros
+    serializer = HistorialVentasSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    fecha_desde = serializer.validated_data.get('fecha_desde')
+    fecha_hasta = serializer.validated_data.get('fecha_hasta')
+    cliente_nombre = serializer.validated_data.get('cliente_nombre')
+    socio_id = serializer.validated_data.get('socio_id')
+    estado_pedido = serializer.validated_data.get('estado_pedido')
+    metodo_pago = serializer.validated_data.get('metodo_pago')
+    
+    # Base queryset
+    queryset = Pedido.objects.select_related('socio__usuario').prefetch_related('pagos')
+    
+    # Aplicar filtros
+    if fecha_desde:
+        queryset = queryset.filter(fecha_pedido__gte=fecha_desde)
+    if fecha_hasta:
+        queryset = queryset.filter(fecha_pedido__lte=fecha_hasta)
+    if cliente_nombre:
+        queryset = queryset.filter(cliente_nombre__icontains=cliente_nombre)
+    if socio_id:
+        queryset = queryset.filter(socio_id=socio_id)
+    if estado_pedido:
+        queryset = queryset.filter(estado=estado_pedido)
+    if metodo_pago:
+        queryset = queryset.filter(pagos__metodo_pago=metodo_pago).distinct()
+    
+    # Restricción de permisos: socios solo ven sus ventas
+    if not request.user.is_staff:
+        try:
+            socio = Socio.objects.get(usuario=request.user)
+            queryset = queryset.filter(socio=socio)
+        except Socio.DoesNotExist:
+            queryset = queryset.none()
+    
+    queryset = queryset.order_by('-fecha_pedido')
+    
+    # Estadísticas
+    total_ventas = queryset.count()
+    total_monto = queryset.aggregate(total=Sum('total'))['total'] or Decimal('0')
+    total_pagado = Pago.objects.filter(
+        pedido__in=queryset,
+        estado='COMPLETADO'
+    ).aggregate(total=Sum('monto'))['total'] or Decimal('0')
+    
+    # Paginación
+    page = int(request.query_params.get('page', 1))
+    page_size = int(request.query_params.get('page_size', 20))
+    start = (page - 1) * page_size
+    end = start + page_size
+    
+    pedidos = queryset[start:end]
+    pedidos_data = PedidoSerializer(pedidos, many=True).data
+    
+    return Response({
+        'count': total_ventas,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': (total_ventas + page_size - 1) // page_size if page_size > 0 else 0,
+        'estadisticas': {
+            'total_ventas': total_ventas,
+            'total_monto': str(total_monto),
+            'total_pagado': str(total_pagado),
+            'total_pendiente': str(total_monto - total_pagado)
+        },
+        'filtros_aplicados': {
+            'fecha_desde': fecha_desde.isoformat() if fecha_desde else None,
+            'fecha_hasta': fecha_hasta.isoformat() if fecha_hasta else None,
+            'cliente_nombre': cliente_nombre,
+            'socio_id': socio_id,
+            'estado_pedido': estado_pedido,
+            'metodo_pago': metodo_pago
+        },
+        'results': pedidos_data
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def exportar_ventas_csv(request):
+    """
+    Exportar historial de ventas a CSV
+    GET /api/exportar-ventas-csv/?fecha_desde=YYYY-MM-DD&fecha_hasta=YYYY-MM-DD&...
+    """
+    # Validar filtros (mismo que historial_ventas)
+    serializer = HistorialVentasSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    fecha_desde = serializer.validated_data.get('fecha_desde')
+    fecha_hasta = serializer.validated_data.get('fecha_hasta')
+    cliente_nombre = serializer.validated_data.get('cliente_nombre')
+    socio_id = serializer.validated_data.get('socio_id')
+    estado_pedido = serializer.validated_data.get('estado_pedido')
+    metodo_pago = serializer.validated_data.get('metodo_pago')
+    
+    # Base queryset
+    queryset = Pedido.objects.select_related('socio__usuario').prefetch_related('pagos')
+    
+    # Aplicar filtros
+    if fecha_desde:
+        queryset = queryset.filter(fecha_pedido__gte=fecha_desde)
+    if fecha_hasta:
+        queryset = queryset.filter(fecha_pedido__lte=fecha_hasta)
+    if cliente_nombre:
+        queryset = queryset.filter(cliente_nombre__icontains=cliente_nombre)
+    if socio_id:
+        queryset = queryset.filter(socio_id=socio_id)
+    if estado_pedido:
+        queryset = queryset.filter(estado=estado_pedido)
+    if metodo_pago:
+        queryset = queryset.filter(pagos__metodo_pago=metodo_pago).distinct()
+    
+    # Restricción de permisos
+    if not request.user.is_staff:
+        try:
+            socio = Socio.objects.get(usuario=request.user)
+            queryset = queryset.filter(socio=socio)
+        except Socio.DoesNotExist:
+            return Response(
+                {'error': 'Usuario no asociado a un socio'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+    
+    queryset = queryset.order_by('-fecha_pedido')
+    
+    # Crear respuesta CSV
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="ventas_{timezone.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+    response.write('\ufeff')  # BOM para UTF-8
+    
+    writer = csv.writer(response)
+    
+    # Encabezados
+    writer.writerow([
+        'Número Pedido',
+        'Fecha',
+        'Cliente',
+        'Email',
+        'Teléfono',
+        'Socio',
+        'Subtotal',
+        'Impuestos',
+        'Descuento',
+        'Total',
+        'Total Pagado',
+        'Saldo Pendiente',
+        'Estado',
+        'Estado Pago'
+    ])
+    
+    # Datos
+    for pedido in queryset:
+        writer.writerow([
+            pedido.numero_pedido,
+            pedido.fecha_pedido.strftime('%Y-%m-%d %H:%M'),
+            pedido.cliente_nombre,
+            pedido.cliente_email or '',
+            pedido.cliente_telefono or '',
+            f"{pedido.socio.usuario.nombres} {pedido.socio.usuario.apellidos}",
+            str(pedido.subtotal),
+            str(pedido.impuestos),
+            str(pedido.descuento),
+            str(pedido.total),
+            str(pedido.total_pagado),
+            str(pedido.saldo_pendiente),
+            pedido.estado,
+            pedido.estado_pago
+        ])
+    
+    # Registrar exportación en bitácora
+    BitacoraAuditoria.objects.create(
+        usuario=request.user,
+        accion='EXPORTAR_VENTAS_CSV',
+        tabla_afectada='Pedido',
+        registro_id=None,
+        detalles={
+            'total_registros': queryset.count(),
+            'filtros': {
+                'fecha_desde': fecha_desde.isoformat() if fecha_desde else None,
+                'fecha_hasta': fecha_hasta.isoformat() if fecha_hasta else None,
+                'cliente_nombre': cliente_nombre,
+                'socio_id': socio_id,
+                'estado_pedido': estado_pedido,
+                'metodo_pago': metodo_pago
+            }
+        },
+        ip_address=get_client_ip(request),
+        user_agent=request.META.get('HTTP_USER_AGENT', '')
+    )
+    
+    return response
+
+# ============================================================
+# SISTEMA DE VENTAS DE INSUMOS - VIEWS
+# ============================================================
+
+class PrecioTemporadaViewSet(viewsets.ModelViewSet):
+    queryset = PrecioTemporada.objects.all()
+    serializer_class = PrecioTemporadaSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ['tipo_insumo', 'temporada', 'activo']
+    ordering = ['-fecha_inicio']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        vigente = self.request.query_params.get('vigente')
+        if vigente and vigente.lower() == 'true':
+            from django.utils import timezone
+            hoy = timezone.now().date()
+            queryset = queryset.filter(fecha_inicio__lte=hoy, fecha_fin__gte=hoy, activo=True)
+        return queryset.select_related('semilla', 'pesticida', 'fertilizante')
+
+
+class PedidoInsumoViewSet(viewsets.ModelViewSet):
+    queryset = PedidoInsumo.objects.all()
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ['estado', 'socio']
+    ordering = ['-fecha_pedido']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PedidoInsumoCreateSerializer
+        return PedidoInsumoSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_staff:
+            try:
+                socio = Socio.objects.get(usuario=self.request.user)
+                queryset = queryset.filter(socio=socio)
+            except Socio.DoesNotExist:
+                queryset = queryset.none()
+        return queryset.select_related('socio__usuario').prefetch_related('items', 'pagos_insumo')
+
+    def perform_create(self, serializer):
+        pedido = serializer.save()
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user, accion='CREAR_PEDIDO_INSUMO',
+            tabla_afectada='PedidoInsumo', registro_id=pedido.id,
+            detalles={'numero_pedido': pedido.numero_pedido, 'total': str(pedido.total)},
+            ip_address=get_client_ip(self.request), user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        pedido = self.get_object()
+        if not request.user.is_staff:
+            return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+        if pedido.estado != 'SOLICITADO':
+            return Response({'error': 'Estado inv�lido'}, status=status.HTTP_400_BAD_REQUEST)
+        pedido.aprobar(request.user)
+        return Response({'mensaje': 'Aprobado', 'pedido': PedidoInsumoSerializer(pedido).data})
+
+    @action(detail=True, methods=['post'])
+    def entregar(self, request, pk=None):
+        pedido = self.get_object()
+        if not request.user.is_staff:
+            return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+        pedido.marcar_entregado(request.user)
+        return Response({'mensaje': 'Entregado', 'pedido': PedidoInsumoSerializer(pedido).data})
+
+
+    class PagoInsumoViewSet(viewsets.ModelViewSet):
+        queryset = PagoInsumo.objects.all()
+        serializer_class = PagoInsumoSerializer
+        permission_classes = [IsAuthenticated]
+        filterset_fields = ['pedido_insumo', 'metodo_pago', 'estado']
+        ordering = ['-fecha_pago']
+
+        def get_queryset(self):
+            queryset = super().get_queryset()
+            if not self.request.user.is_staff:
+                try:
+                    socio = Socio.objects.get(usuario=self.request.user)
+                    queryset = queryset.filter(pedido_insumo__socio=socio)
+                except Socio.DoesNotExist:
+                    queryset = queryset.none()
+            return queryset.select_related('pedido_insumo__socio__usuario', 'registrado_por')
+
+        def perform_create(self, serializer):
+            serializer.validated_data['registrado_por'] = self.request.user
+            pago = serializer.save()
+            BitacoraAuditoria.objects.create(
+                usuario=self.request.user, accion='REGISTRAR_PAGO_INSUMO',
+                tabla_afectada='PagoInsumo', registro_id=pago.id,
+                detalles={'numero_recibo': pago.numero_recibo, 'monto': str(pago.monto)},
+                ip_address=get_client_ip(self.request), user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+            )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def historial_compras_insumos(request):
+    serializer = HistorialComprasInsumosSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    queryset = PedidoInsumo.objects.select_related('socio__usuario').prefetch_related('items', 'pagos_insumo')
+    
+    if not request.user.is_staff:
+        try:
+            socio = Socio.objects.get(usuario=request.user)
+            queryset = queryset.filter(socio=socio)
+        except Socio.DoesNotExist:
+            queryset = queryset.none()
+    
+    total_pedidos = queryset.count()
+    total_gastado = queryset.aggregate(total=Sum('total'))['total'] or Decimal('0')
+    
+    page = int(request.query_params.get('page', 1))
+    page_size = int(request.query_params.get('page_size', 20))
+    start = (page - 1) * page_size
+    end = start + page_size
+    
+    pedidos = queryset.order_by('-fecha_pedido')[start:end]
+    
+    return Response({
+        'count': total_pedidos,
+        'page': page,
+        'estadisticas': {'total_pedidos': total_pedidos, 'total_gastado': str(total_gastado)},
+        'results': PedidoInsumoSerializer(pedidos, many=True).data
     })

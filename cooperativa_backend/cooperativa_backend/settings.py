@@ -73,6 +73,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8080",  # Additional common ports
     "http://127.0.0.1:8080",
     # Add your production domain here
+    "https://cooperativa-despliegue.vercel.app",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -188,13 +189,13 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Session settings for CORS compatibility
-SESSION_COOKIE_SAMESITE = 'Lax'  # Changed from 'Strict' to 'Lax' for cross-site requests
-SESSION_COOKIE_SECURE = False  # Set to False for development (HTTP)
+SESSION_COOKIE_SAMESITE = 'None'  # Required for cross-site requests from HTTPS to HTTP
+SESSION_COOKIE_SECURE = True  # Required when SameSite=None (browsers will only send over HTTPS)
 SESSION_COOKIE_HTTPONLY = True
 
 # CSRF settings for CORS compatibility
-CSRF_COOKIE_SAMESITE = 'Lax'  # Changed from 'Strict' to 'Lax' for cross-site requests
-CSRF_COOKIE_SECURE = False  # Set to False for development (HTTP)
+CSRF_COOKIE_SAMESITE = 'None'  # Required for cross-site requests from HTTPS to HTTP
+CSRF_COOKIE_SECURE = True  # Required when SameSite=None
 CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read CSRF cookie
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:5173',
@@ -203,4 +204,12 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:3000',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    'https://cooperativa-despliegue.vercel.app',
 ]
+
+# Stripe Configuration - Sistema de Pagos
+# Obtener keys de Stripe desde variables de entorno
+STRIPE_PUBLIC_KEY = os.getenv('STRIPE_PUBLIC_KEY', '')
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', '')
+STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', '')
+

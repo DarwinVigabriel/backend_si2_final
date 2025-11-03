@@ -5,7 +5,8 @@ from django.utils.html import format_html
 from .models import (
     Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, 
     BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, 
-    Fertilizante, Labor, ProductoCosechado 
+    Fertilizante, Labor, ProductoCosechado, Pedido, 
+    DetallePedido, Pago
 )
 
 # Register your models here.
@@ -1166,3 +1167,388 @@ from .admin_campaigns import CampaignAdmin, CampaignPartnerAdmin, CampaignPlotAd
 
 # Las clases ya están registradas con @admin.register en admin_campaigns.py
 # No es necesario volver a registrarlas aquí
+
+# =============================================================================
+# ADMINISTRACIÓN DEL SISTEMA DE PAGOS (CU16)
+# =============================================================================
+
+class DetallePedidoInline(admin.TabularInline):
+    """Inline para mostrar los detalles de un pedido"""
+    model = DetallePedido
+    extra = 0
+    readonly_fields = ('subtotal',)
+    fields = ('producto_cosechado', 'producto_nombre', 'cantidad', 'unidad_medida', 'precio_unitario', 'subtotal')
+    raw_id_fields = ('producto_cosechado',)
+    
+    def subtotal(self, obj):
+        if obj.id:
+            return f"{obj.subtotal:.2f} Bs"
+        return "0.00 Bs"
+    subtotal.short_description = 'Subtotal'
+
+
+@admin.register(Pedido)
+class PedidoAdmin(admin.ModelAdmin):
+    """
+    CU16: Administración de pedidos en Django Admin
+    Sistema de gestión de pedidos con integración de pagos
+    """
+    list_display = (
+        'numero_pedido', 'socio_display', 'cliente_nombre', 
+        'total_display', 'total_pagado_display', 'saldo_pendiente_display',
+        'estado_badge', 'estado_pago_badge', 'fecha_pedido'
+    )
+    
+    list_filter = (
+        'estado', 'fecha_pedido', 'socio', 'creado_en'
+    )
+    
+    search_fields = (
+        'numero_pedido', 'cliente_nombre', 'cliente_email', 
+        'cliente_telefono', 'socio__usuario__nombres', 'socio__usuario__apellidos'
+    )
+    
+    readonly_fields = (
+        'numero_pedido', 'creado_en', 'actualizado_en', 
+        'total_display', 'total_pagado_display', 
+        'saldo_pendiente_display', 'estado_pago_display'
+    )
+    
+    inlines = [DetallePedidoInline]
+    
+    date_hierarchy = 'fecha_pedido'
+    
+    list_per_page = 25
+    
+    actions = ['marcar_como_confirmado', 'marcar_como_completado', 'marcar_como_cancelado']
+    
+    fieldsets = (
+        ('Información del Pedido', {
+            'fields': (
+                'numero_pedido', 'socio', 'fecha_pedido', 'estado'
+            )
+        }),
+        ('Información del Cliente', {
+            'fields': (
+                'cliente_nombre', 'cliente_email', 'cliente_telefono', 'cliente_direccion'
+            )
+        }),
+        ('Montos', {
+            'fields': (
+                'subtotal', 'descuento', 'impuestos', 'total',
+                'total_display', 'total_pagado_display', 
+                'saldo_pendiente_display', 'estado_pago_display'
+            )
+        }),
+        ('Información Adicional', {
+            'fields': ('observaciones',),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': ('creado_en', 'actualizado_en'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def socio_display(self, obj):
+        """Muestra información del socio"""
+        if obj.socio:
+            return format_html(
+                '{}<br><small style="color: #666;">{}</small>',
+                f"{obj.socio.usuario.nombres} {obj.socio.usuario.apellidos}",
+                obj.socio.codigo_interno
+            )
+        return "—"
+    socio_display.short_description = 'Socio'
+    
+    def total_display(self, obj):
+        """Muestra el monto total formateado"""
+        return f"{obj.total:.2f} Bs"
+    total_display.short_description = 'Monto Total'
+    
+    def total_pagado_display(self, obj):
+        """Muestra el total pagado formateado"""
+        total = obj.total_pagado
+        if total > 0:
+            return format_html(
+                '<span style="color: green; font-weight: bold;">{:.2f} Bs</span>',
+                total
+            )
+        return "0.00 Bs"
+    total_pagado_display.short_description = 'Total Pagado'
+    
+    def saldo_pendiente_display(self, obj):
+        """Muestra el saldo pendiente formateado"""
+        saldo = obj.saldo_pendiente
+        if saldo > 0:
+            return format_html(
+                '<span style="color: red; font-weight: bold;">{:.2f} Bs</span>',
+                saldo
+            )
+        return format_html(
+            '<span style="color: green; font-weight: bold;">0.00 Bs</span>'
+        )
+    saldo_pendiente_display.short_description = 'Saldo Pendiente'
+    
+    def estado_badge(self, obj):
+        """Muestra el estado del pedido con colores"""
+        colors = {
+            'PENDIENTE': 'gray',
+            'CONFIRMADO': 'blue',
+            'EN_PROCESO': 'orange',
+            'COMPLETADO': 'green',
+            'CANCELADO': 'red'
+        }
+        color = colors.get(obj.estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            obj.get_estado_display()
+        )
+    estado_badge.short_description = 'Estado'
+    estado_badge.admin_order_field = 'estado'
+    
+    def estado_pago_badge(self, obj):
+        """Muestra el estado del pago con colores"""
+        estado = obj.estado_pago
+        colors = {
+            'PENDIENTE': 'red',
+            'PARCIAL': 'orange',
+            'PAGADO': 'green'
+        }
+        color = colors.get(estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            estado
+        )
+    estado_pago_badge.short_description = 'Estado Pago'
+    
+    def estado_pago_display(self, obj):
+        """Muestra el estado del pago con detalles"""
+        return obj.estado_pago
+    estado_pago_display.short_description = 'Estado de Pago'
+    
+    def marcar_como_confirmado(self, request, queryset):
+        """Acción para confirmar pedidos"""
+        updated = queryset.filter(estado='PENDIENTE').update(estado='CONFIRMADO')
+        self.message_user(
+            request, 
+            f'{updated} pedido(s) confirmado(s).'
+        )
+    marcar_como_confirmado.short_description = "Marcar como CONFIRMADO"
+    
+    def marcar_como_completado(self, request, queryset):
+        """Acción para completar pedidos"""
+        updated = queryset.filter(
+            estado__in=['CONFIRMADO', 'EN_PROCESO']
+        ).update(estado='COMPLETADO')
+        self.message_user(
+            request, 
+            f'{updated} pedido(s) completado(s).'
+        )
+    marcar_como_completado.short_description = "Marcar como COMPLETADO"
+    
+    def marcar_como_cancelado(self, request, queryset):
+        """Acción para cancelar pedidos"""
+        updated = queryset.exclude(
+            estado__in=['COMPLETADO', 'CANCELADO']
+        ).update(estado='CANCELADO')
+        self.message_user(
+            request, 
+            f'{updated} pedido(s) cancelado(s).'
+        )
+    marcar_como_cancelado.short_description = "Marcar como CANCELADO"
+    
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'socio__usuario'
+        ).prefetch_related('items__producto')
+
+
+@admin.register(DetallePedido)
+class DetallePedidoAdmin(admin.ModelAdmin):
+    """
+    CU16: Administración de detalles de pedidos
+    """
+    list_display = (
+        'id', 'pedido_numero', 'producto_nombre', 'cantidad', 
+        'unidad_medida', 'precio_unitario_display', 'subtotal_display'
+    )
+    
+    list_filter = ('pedido__fecha_pedido', 'unidad_medida')
+    
+    search_fields = (
+        'pedido__numero_pedido', 'producto_nombre', 
+        'producto_cosechado__cultivo__especie'
+    )
+    
+    readonly_fields = ('subtotal', 'creado_en')
+    
+    raw_id_fields = ('pedido', 'producto_cosechado')
+    
+    def pedido_numero(self, obj):
+        """Muestra el número de pedido"""
+        return obj.pedido.numero_pedido
+    pedido_numero.short_description = 'Pedido'
+    pedido_numero.admin_order_field = 'pedido__numero_pedido'
+    
+    def precio_unitario_display(self, obj):
+        """Muestra el precio unitario formateado"""
+        return f"{obj.precio_unitario:.2f} Bs"
+    precio_unitario_display.short_description = 'Precio Unitario'
+    
+    def subtotal_display(self, obj):
+        """Muestra el subtotal formateado"""
+        return f"{obj.subtotal:.2f} Bs"
+    subtotal_display.short_description = 'Subtotal'
+    
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'pedido', 'producto_cosechado__cultivo'
+        )
+
+
+@admin.register(Pago)
+class PagoAdmin(admin.ModelAdmin):
+    """
+    CU16: Administración de pagos en Django Admin
+    Sistema de gestión de pagos con integración Stripe
+    """
+    list_display = (
+        'numero_recibo', 'pedido_numero', 'monto_display', 'metodo_pago_display',
+        'estado_badge', 'fecha_pago', 'payment_intent_id_short'
+    )
+    
+    list_filter = (
+        'estado', 'metodo_pago', 'fecha_pago', 'creado_en'
+    )
+    
+    search_fields = (
+        'pedido__numero_pedido', 'numero_recibo', 'stripe_payment_intent_id', 
+        'stripe_charge_id', 'stripe_customer_id', 'referencia_bancaria', 'banco'
+    )
+    
+    readonly_fields = (
+        'numero_recibo', 'creado_en', 'actualizado_en', 'stripe_payment_intent_id',
+        'stripe_charge_id', 'stripe_customer_id', 'fecha_pago'
+    )
+    
+    date_hierarchy = 'fecha_pago'
+    
+    list_per_page = 25
+    
+    actions = ['marcar_como_completado', 'marcar_como_cancelado']
+    
+    fieldsets = (
+        ('Información del Pago', {
+            'fields': (
+                'numero_recibo', 'pedido', 'monto', 'metodo_pago', 'estado', 'fecha_pago'
+            )
+        }),
+        ('Información Stripe', {
+            'fields': (
+                'stripe_payment_intent_id', 'stripe_charge_id', 
+                'stripe_customer_id'
+            ),
+            'classes': ('collapse',)
+        }),
+        ('Información Adicional', {
+            'fields': (
+                'referencia_bancaria', 'banco', 'comprobante_archivo', 'observaciones'
+            ),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': ('creado_en', 'actualizado_en'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    raw_id_fields = ('pedido',)
+    
+    def pedido_numero(self, obj):
+        """Muestra el número de pedido"""
+        return obj.pedido.numero_pedido
+    pedido_numero.short_description = 'Pedido'
+    pedido_numero.admin_order_field = 'pedido__numero_pedido'
+    
+    def monto_display(self, obj):
+        """Muestra el monto formateado"""
+        return format_html(
+            '<span style="font-weight: bold;">{:.2f} Bs</span>',
+            obj.monto
+        )
+    monto_display.short_description = 'Monto'
+    
+    def metodo_pago_display(self, obj):
+        """Muestra el método de pago con icono"""
+        icons = {
+            'EFECTIVO': '💵',
+            'TRANSFERENCIA': '🏦',
+            'STRIPE': '💳',
+            'QR': '📱',
+            'OTRO': '📋'
+        }
+        icon = icons.get(obj.metodo_pago, '❓')
+        return f"{icon} {obj.get_metodo_pago_display()}"
+    metodo_pago_display.short_description = 'Método de Pago'
+    metodo_pago_display.admin_order_field = 'metodo_pago'
+    
+    def estado_badge(self, obj):
+        """Muestra el estado del pago con colores"""
+        colors = {
+            'PENDIENTE': 'gray',
+            'PROCESANDO': 'blue',
+            'COMPLETADO': 'green',
+            'FALLIDO': 'red',
+            'REEMBOLSADO': 'orange',
+            'CANCELADO': 'darkred'
+        }
+        color = colors.get(obj.estado, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            obj.get_estado_display()
+        )
+    estado_badge.short_description = 'Estado'
+    estado_badge.admin_order_field = 'estado'
+    
+    def payment_intent_id_short(self, obj):
+        """Muestra una versión corta del payment intent ID"""
+        if obj.stripe_payment_intent_id:
+            return f"{obj.stripe_payment_intent_id[:20]}..."
+        return "—"
+    payment_intent_id_short.short_description = 'Payment Intent'
+    
+    def marcar_como_completado(self, request, queryset):
+        """Acción para marcar pagos como completados"""
+        # Solo pagos en efectivo o transferencia pueden ser completados manualmente
+        updated = queryset.filter(
+            metodo_pago__in=['EFECTIVO', 'TRANSFERENCIA', 'QR', 'OTRO'],
+            estado='PENDIENTE'
+        ).update(estado='COMPLETADO')
+        self.message_user(
+            request, 
+            f'{updated} pago(s) marcado(s) como completado(s).'
+        )
+    marcar_como_completado.short_description = "Marcar como COMPLETADO (solo no-Stripe)"
+    
+    def marcar_como_cancelado(self, request, queryset):
+        """Acción para cancelar pagos"""
+        updated = queryset.filter(
+            estado__in=['PENDIENTE', 'PROCESANDO']
+        ).update(estado='CANCELADO')
+        self.message_user(
+            request, 
+            f'{updated} pago(s) cancelado(s).'
+        )
+    marcar_como_cancelado.short_description = "Marcar como CANCELADO"
+    
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'pedido__socio__usuario'
+        )

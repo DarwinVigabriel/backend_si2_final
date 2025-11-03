@@ -7,7 +7,9 @@ from .models import (
     Parcela, Cultivo, BitacoraAuditoria,
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
     Semilla, Pesticida, Fertilizante,
-    Campaign, CampaignPartner, CampaignPlot, Labor, ProductoCosechado
+    Campaign, CampaignPartner, CampaignPlot, Labor, ProductoCosechado,
+    Pedido, DetallePedido, Pago,
+    PrecioTemporada, PedidoInsumo, DetallePedidoInsumo, PagoInsumo
 )
 
 
@@ -1620,3 +1622,529 @@ class ProductoCosechadoCambiarEstadoSerializer(serializers.Serializer):
             producto.cambiar_estado(nuevo_estado, observaciones)
         
         return producto
+
+
+# ============================================================================
+# SISTEMA DE PAGOS - SERIALIZERS
+# Serializers para gestión de pedidos, pagos y ventas
+# ============================================================================
+
+class DetallePedidoSerializer(serializers.ModelSerializer):
+    """Serializer para Detalle de Pedido"""
+    producto_cosechado_nombre = serializers.CharField(
+        source='producto_cosechado.cultivo.especie',
+        read_only=True
+    )
+    
+    class Meta:
+        model = DetallePedido
+        fields = [
+            'id', 'pedido', 'producto_cosechado', 'producto_cosechado_nombre',
+            'producto_nombre', 'producto_descripcion', 'cantidad',
+            'unidad_medida', 'precio_unitario', 'subtotal', 'creado_en'
+        ]
+        read_only_fields = ['subtotal', 'creado_en']
+
+    def validate_cantidad(self, value):
+        """Validar cantidad"""
+        if value <= 0:
+            raise serializers.ValidationError('La cantidad debe ser mayor a 0')
+        return value
+
+    def validate_precio_unitario(self, value):
+        """Validar precio unitario"""
+        if value < 0:
+            raise serializers.ValidationError('El precio no puede ser negativo')
+        return value
+
+
+class PedidoSerializer(serializers.ModelSerializer):
+    """Serializer principal para Pedido"""
+    items = DetallePedidoSerializer(many=True, read_only=True)
+    socio_nombre = serializers.CharField(
+        source='socio.usuario.get_full_name',
+        read_only=True
+    )
+    creado_por_nombre = serializers.CharField(
+        source='creado_por.get_full_name',
+        read_only=True
+    )
+    total_pagado = serializers.SerializerMethodField()
+    saldo_pendiente = serializers.SerializerMethodField()
+    estado_pago = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Pedido
+        fields = [
+            'id', 'numero_pedido', 'socio', 'socio_nombre',
+            'cliente_nombre', 'cliente_email', 'cliente_telefono', 'cliente_direccion',
+            'fecha_pedido', 'fecha_entrega_estimada', 'fecha_entrega_real',
+            'subtotal', 'impuestos', 'descuento', 'total',
+            'estado', 'observaciones', 'creado_por', 'creado_por_nombre',
+            'creado_en', 'actualizado_en', 'items',
+            'total_pagado', 'saldo_pendiente', 'estado_pago'
+        ]
+        read_only_fields = [
+            'numero_pedido', 'total', 'creado_en', 'actualizado_en',
+            'total_pagado', 'saldo_pendiente', 'estado_pago'
+        ]
+
+    def get_total_pagado(self, obj):
+        """Calcula el total pagado del pedido"""
+        from django.db.models import Sum
+        from decimal import Decimal
+        total = obj.pagos.filter(estado='COMPLETADO').aggregate(
+            total=Sum('monto')
+        )['total']
+        return total or Decimal('0')
+
+    def get_saldo_pendiente(self, obj):
+        """Calcula el saldo pendiente del pedido"""
+        return obj.total - self.get_total_pagado(obj)
+
+    def get_estado_pago(self, obj):
+        """Determina el estado del pago"""
+        saldo = self.get_saldo_pendiente(obj)
+        if saldo <= 0:
+            return 'PAGADO'
+        elif saldo < obj.total:
+            return 'PARCIAL'
+        else:
+            return 'PENDIENTE'
+
+    def validate(self, data):
+        """Validaciones del pedido"""
+        # Validar que tenga cliente_nombre o socio
+        socio = data.get('socio')
+        cliente_nombre = data.get('cliente_nombre')
+        
+        if not socio and not cliente_nombre:
+            raise serializers.ValidationError({
+                'cliente_nombre': 'Debe especificar un socio o un nombre de cliente'
+            })
+
+        # Validar fechas
+        fecha_entrega_estimada = data.get('fecha_entrega_estimada')
+        fecha_pedido = data.get('fecha_pedido') or timezone.now().date()
+        
+        if fecha_entrega_estimada and fecha_entrega_estimada < fecha_pedido:
+            raise serializers.ValidationError({
+                'fecha_entrega_estimada': 'La fecha de entrega no puede ser anterior a la fecha del pedido'
+            })
+
+        return data
+
+
+class PedidoCreateSerializer(serializers.ModelSerializer):
+    """Serializer para creación de pedidos con items"""
+    items = DetallePedidoSerializer(many=True)
+
+    class Meta:
+        model = Pedido
+        fields = [
+            'socio', 'cliente_nombre', 'cliente_email', 'cliente_telefono',
+            'cliente_direccion', 'fecha_entrega_estimada', 'descuento',
+            'observaciones', 'items'
+        ]
+
+    def create(self, validated_data):
+        """Crear pedido con sus items"""
+        items_data = validated_data.pop('items')
+        pedido = Pedido.objects.create(**validated_data)
+
+        # Crear items
+        for item_data in items_data:
+            DetallePedido.objects.create(pedido=pedido, **item_data)
+
+        return pedido
+
+
+class PagoSerializer(serializers.ModelSerializer):
+    """Serializer principal para Pago"""
+    pedido_numero = serializers.CharField(source='pedido.numero_pedido', read_only=True)
+    cliente_nombre = serializers.CharField(source='pedido.cliente_nombre', read_only=True)
+    procesado_por_nombre = serializers.CharField(
+        source='procesado_por.get_full_name',
+        read_only=True
+    )
+    metodo_pago_display = serializers.CharField(
+        source='get_metodo_pago_display',
+        read_only=True
+    )
+    estado_display = serializers.CharField(
+        source='get_estado_display',
+        read_only=True
+    )
+
+    class Meta:
+        model = Pago
+        fields = [
+            'id', 'numero_recibo', 'pedido', 'pedido_numero', 'cliente_nombre',
+            'fecha_pago', 'monto', 'metodo_pago', 'metodo_pago_display',
+            'estado', 'estado_display', 'referencia_bancaria', 'banco',
+            'comprobante_archivo', 'observaciones', 'stripe_payment_intent_id',
+            'stripe_charge_id', 'procesado_por', 'procesado_por_nombre',
+            'creado_en', 'actualizado_en'
+        ]
+        read_only_fields = [
+            'numero_recibo', 'stripe_payment_intent_id', 'stripe_charge_id',
+            'creado_en', 'actualizado_en'
+        ]
+
+    def validate_monto(self, value):
+        """Validar monto"""
+        if value <= 0:
+            raise serializers.ValidationError('El monto debe ser mayor a 0')
+        return value
+
+    def validate(self, data):
+        """Validaciones del pago"""
+        pedido = data.get('pedido')
+        monto = data.get('monto')
+        metodo_pago = data.get('metodo_pago')
+
+        # Validar que el pedido no esté cancelado
+        if pedido and pedido.estado == 'CANCELADO':
+            raise serializers.ValidationError({
+                'pedido': 'No se puede registrar un pago para un pedido cancelado'
+            })
+
+        # Validar que el monto no exceda el saldo pendiente
+        if pedido and monto:
+            from django.db.models import Sum
+            from decimal import Decimal
+            total_pagado = pedido.pagos.filter(estado='COMPLETADO').aggregate(
+                total=Sum('monto')
+            )['total'] or Decimal('0')
+            saldo_pendiente = pedido.total - total_pagado
+
+            if monto > saldo_pendiente:
+                raise serializers.ValidationError({
+                    'monto': f'El monto excede el saldo pendiente (Bs. {saldo_pendiente})'
+                })
+
+        # Validar campos según método de pago
+        if metodo_pago == 'TRANSFERENCIA':
+            if not data.get('referencia_bancaria') or not data.get('banco'):
+                raise serializers.ValidationError({
+                    'referencia_bancaria': 'La referencia bancaria y banco son requeridos para transferencias',
+                    'banco': 'La referencia bancaria y banco son requeridos para transferencias'
+                })
+
+        return data
+
+
+class PagoCreateSerializer(serializers.ModelSerializer):
+    """Serializer para creación de pagos"""
+    class Meta:
+        model = Pago
+        fields = [
+            'pedido', 'monto', 'metodo_pago', 'referencia_bancaria',
+            'banco', 'comprobante_archivo', 'observaciones'
+        ]
+
+    def create(self, validated_data):
+        """Crear pago y actualizar estado si es completado"""
+        # Si es pago en efectivo o transferencia, marcar como completado automáticamente
+        metodo = validated_data.get('metodo_pago')
+        if metodo in ['EFECTIVO', 'TRANSFERENCIA', 'QR']:
+            validated_data['estado'] = 'COMPLETADO'
+
+        pago = Pago.objects.create(**validated_data)
+        return pago
+
+
+class PagoStripeSerializer(serializers.Serializer):
+    """Serializer para procesar pagos con Stripe"""
+    pedido_id = serializers.IntegerField()
+    monto = serializers.DecimalField(max_digits=12, decimal_places=2)
+    payment_method_id = serializers.CharField(max_length=200)
+    observaciones = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_monto(self, value):
+        """Validar monto"""
+        if value <= 0:
+            raise serializers.ValidationError('El monto debe ser mayor a 0')
+        return value
+
+    def validate_pedido_id(self, value):
+        """Validar que el pedido exista"""
+        try:
+            Pedido.objects.get(id=value)
+        except Pedido.DoesNotExist:
+            raise serializers.ValidationError('El pedido no existe')
+        return value
+
+
+class HistorialVentasSerializer(serializers.Serializer):
+    """Serializer para filtros de historial de ventas"""
+    fecha_desde = serializers.DateField(required=False)
+    fecha_hasta = serializers.DateField(required=False)
+    cliente_nombre = serializers.CharField(required=False, allow_blank=True)
+    socio_id = serializers.IntegerField(required=False)
+    estado_pedido = serializers.ChoiceField(
+        choices=Pedido.ESTADOS_PEDIDO,
+        required=False
+    )
+    metodo_pago = serializers.ChoiceField(
+        choices=Pago.METODOS_PAGO,
+        required=False
+    )
+
+    def validate(self, data):
+        """Validar fechas"""
+        fecha_desde = data.get('fecha_desde')
+        fecha_hasta = data.get('fecha_hasta')
+
+        if fecha_desde and fecha_hasta and fecha_desde > fecha_hasta:
+            raise serializers.ValidationError({
+                'fecha_hasta': 'La fecha hasta no puede ser anterior a la fecha desde'
+            })
+
+        return data
+
+
+# ============================================================
+# SISTEMA DE VENTAS DE INSUMOS - SERIALIZERS
+# ============================================================
+
+class PrecioTemporadaSerializer(serializers.ModelSerializer):
+    """Serializer para PrecioTemporada"""
+    semilla_detalle = serializers.SerializerMethodField()
+    pesticida_detalle = serializers.SerializerMethodField()
+    fertilizante_detalle = serializers.SerializerMethodField()
+    tipo_insumo_display = serializers.CharField(source='get_tipo_insumo_display', read_only=True)
+    temporada_display = serializers.CharField(source='get_temporada_display', read_only=True)
+    esta_vigente = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PrecioTemporada
+        fields = [
+            'id', 'tipo_insumo', 'tipo_insumo_display', 'semilla', 'semilla_detalle',
+            'pesticida', 'pesticida_detalle', 'fertilizante', 'fertilizante_detalle',
+            'temporada', 'temporada_display', 'fecha_inicio', 'fecha_fin',
+            'precio_venta', 'precio_mayoreo', 'cantidad_minima_mayoreo',
+            'activo', 'esta_vigente', 'creado_en', 'actualizado_en'
+        ]
+
+    def get_semilla_detalle(self, obj):
+        if obj.semilla:
+            return {
+                'id': obj.semilla.id,
+                'especie': obj.semilla.especie,
+                'variedad': obj.semilla.variedad
+            }
+        return None
+
+    def get_pesticida_detalle(self, obj):
+        if obj.pesticida:
+            return {
+                'id': obj.pesticida.id,
+                'nombre_comercial': obj.pesticida.nombre_comercial,
+                'ingrediente_activo': obj.pesticida.ingrediente_activo
+            }
+        return None
+
+    def get_fertilizante_detalle(self, obj):
+        if obj.fertilizante:
+            return {
+                'id': obj.fertilizante.id,
+                'nombre_comercial': obj.fertilizante.nombre_comercial,
+                'tipo_fertilizante': obj.fertilizante.tipo_fertilizante,
+                'composicion_npk': obj.fertilizante.composicion_npk
+            }
+        return None
+
+    def get_esta_vigente(self, obj):
+        return obj.esta_vigente()
+
+
+class DetallePedidoInsumoSerializer(serializers.ModelSerializer):
+    """Serializer para DetallePedidoInsumo"""
+    tipo_insumo_display = serializers.CharField(source='get_tipo_insumo_display', read_only=True)
+
+    class Meta:
+        model = DetallePedidoInsumo
+        fields = [
+            'id', 'pedido_insumo', 'tipo_insumo', 'tipo_insumo_display',
+            'semilla', 'pesticida', 'fertilizante',
+            'insumo_nombre', 'insumo_descripcion',
+            'cantidad', 'unidad_medida', 'precio_unitario', 'subtotal',
+            'temporada_aplicada', 'creado_en', 'actualizado_en'
+        ]
+        read_only_fields = ['insumo_nombre', 'insumo_descripcion', 'subtotal']
+
+    def validate(self, data):
+        """Validar que solo se especifique un insumo"""
+        tipo_insumo = data.get('tipo_insumo')
+        semilla = data.get('semilla')
+        pesticida = data.get('pesticida')
+        fertilizante = data.get('fertilizante')
+
+        count = sum([bool(semilla), bool(pesticida), bool(fertilizante)])
+        if count != 1:
+            raise serializers.ValidationError(
+                'Debe especificar exactamente un insumo (semilla, pesticida o fertilizante)'
+            )
+
+        # Validar que el tipo coincida con el insumo
+        if tipo_insumo == 'SEMILLA' and not semilla:
+            raise serializers.ValidationError('Debe especificar una semilla')
+        if tipo_insumo == 'PESTICIDA' and not pesticida:
+            raise serializers.ValidationError('Debe especificar un pesticida')
+        if tipo_insumo == 'FERTILIZANTE' and not fertilizante:
+            raise serializers.ValidationError('Debe especificar un fertilizante')
+
+        return data
+
+
+class PedidoInsumoSerializer(serializers.ModelSerializer):
+    """Serializer principal para PedidoInsumo"""
+    socio_nombre = serializers.CharField(source='socio.usuario.get_full_name', read_only=True)
+    aprobado_por_nombre = serializers.SerializerMethodField()
+    entregado_por_nombre = serializers.SerializerMethodField()
+    estado_display = serializers.CharField(source='get_estado_display', read_only=True)
+    items = DetallePedidoInsumoSerializer(many=True, read_only=True)
+    total_pagado = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    saldo_pendiente = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    estado_pago = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = PedidoInsumo
+        fields = [
+            'id', 'numero_pedido', 'socio', 'socio_nombre',
+            'fecha_pedido', 'fecha_entrega_solicitada', 'fecha_entrega_real',
+            'subtotal', 'descuento', 'total',
+            'total_pagado', 'saldo_pendiente', 'estado_pago',
+            'estado', 'estado_display', 'motivo_solicitud', 'observaciones',
+            'aprobado_por', 'aprobado_por_nombre', 'fecha_aprobacion',
+            'entregado_por', 'entregado_por_nombre',
+            'items', 'creado_en', 'actualizado_en'
+        ]
+        read_only_fields = [
+            'numero_pedido', 'fecha_aprobacion', 'creado_en', 'actualizado_en'
+        ]
+
+    def get_aprobado_por_nombre(self, obj):
+        if obj.aprobado_por:
+            return obj.aprobado_por.get_full_name()
+        return None
+
+    def get_entregado_por_nombre(self, obj):
+        if obj.entregado_por:
+            return obj.entregado_por.get_full_name()
+        return None
+
+
+class PedidoInsumoCreateSerializer(serializers.ModelSerializer):
+    """Serializer para crear PedidoInsumo con items"""
+    items = DetallePedidoInsumoSerializer(many=True)
+
+    class Meta:
+        model = PedidoInsumo
+        fields = [
+            'socio', 'fecha_entrega_solicitada', 'motivo_solicitud',
+            'observaciones', 'items'
+        ]
+
+    def create(self, validated_data):
+        """Crear pedido con sus items"""
+        items_data = validated_data.pop('items')
+        pedido = PedidoInsumo.objects.create(**validated_data)
+
+        for item_data in items_data:
+            DetallePedidoInsumo.objects.create(pedido_insumo=pedido, **item_data)
+
+        pedido.calcular_totales()
+        return pedido
+
+    def validate_items(self, value):
+        """Validar que haya al menos un item"""
+        if not value or len(value) == 0:
+            raise serializers.ValidationError('Debe agregar al menos un item')
+        return value
+
+
+class PagoInsumoSerializer(serializers.ModelSerializer):
+    """Serializer principal para PagoInsumo"""
+    pedido_numero = serializers.CharField(source='pedido_insumo.numero_pedido', read_only=True)
+    socio_nombre = serializers.CharField(
+        source='pedido_insumo.socio.usuario.get_full_name',
+        read_only=True
+    )
+    registrado_por_nombre = serializers.SerializerMethodField()
+    metodo_pago_display = serializers.CharField(source='get_metodo_pago_display', read_only=True)
+    estado_display = serializers.CharField(source='get_estado_display', read_only=True)
+
+    class Meta:
+        model = PagoInsumo
+        fields = [
+            'id', 'numero_recibo', 'pedido_insumo', 'pedido_numero', 'socio_nombre',
+            'fecha_pago', 'monto', 'metodo_pago', 'metodo_pago_display',
+            'estado', 'estado_display', 'referencia_bancaria', 'banco',
+            'comprobante_archivo', 'observaciones',
+            'registrado_por', 'registrado_por_nombre',
+            'creado_en', 'actualizado_en'
+        ]
+        read_only_fields = ['numero_recibo', 'creado_en', 'actualizado_en']
+
+    def get_registrado_por_nombre(self, obj):
+        if obj.registrado_por:
+            return obj.registrado_por.get_full_name()
+        return None
+
+    def validate(self, data):
+        """Validaciones del pago"""
+        pedido = data.get('pedido_insumo')
+        monto = data.get('monto')
+        metodo_pago = data.get('metodo_pago')
+
+        # Validar que el pedido no esté cancelado
+        if pedido and pedido.estado == 'CANCELADO':
+            raise serializers.ValidationError({
+                'pedido_insumo': 'No se puede registrar un pago para un pedido cancelado'
+            })
+
+        # Validar que el monto no exceda el saldo pendiente
+        if pedido and monto:
+            if monto > pedido.saldo_pendiente:
+                raise serializers.ValidationError({
+                    'monto': f'El monto excede el saldo pendiente (Bs. {pedido.saldo_pendiente})'
+                })
+
+        # Validar campos según método de pago
+        if metodo_pago == 'TRANSFERENCIA':
+            if not data.get('referencia_bancaria') or not data.get('banco'):
+                raise serializers.ValidationError({
+                    'referencia_bancaria': 'La referencia bancaria y banco son requeridos',
+                    'banco': 'La referencia bancaria y banco son requeridos'
+                })
+
+        return data
+
+
+class HistorialComprasInsumosSerializer(serializers.Serializer):
+    """Serializer para filtros de historial de compras de insumos"""
+    socio_id = serializers.IntegerField(required=False)
+    fecha_desde = serializers.DateField(required=False)
+    fecha_hasta = serializers.DateField(required=False)
+    estado = serializers.ChoiceField(
+        choices=PedidoInsumo.ESTADOS_PEDIDO,
+        required=False
+    )
+    tipo_insumo = serializers.ChoiceField(
+        choices=PrecioTemporada.TIPO_INSUMO,
+        required=False
+    )
+
+    def validate(self, data):
+        """Validar fechas"""
+        fecha_desde = data.get('fecha_desde')
+        fecha_hasta = data.get('fecha_hasta')
+
+        if fecha_desde and fecha_hasta and fecha_desde > fecha_hasta:
+            raise serializers.ValidationError({
+                'fecha_hasta': 'La fecha hasta no puede ser anterior a la fecha desde'
+            })
+
+        return data

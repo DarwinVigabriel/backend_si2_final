@@ -2,6 +2,10 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 from .apps.chatbot import urls as chatbot_urls
+from .views_insumos import (
+    PrecioTemporadaViewSet, PedidoInsumoViewSet, PagoInsumoViewSet,
+    historial_compras_insumos
+)
 
 # Crear router para ViewSets
 router = DefaultRouter()
@@ -36,6 +40,15 @@ router.register(r'labores', views.LaborViewSet)
 
 # CU15: ViewSet para gestión de productos cosechados
 router.register(r'productos-cosechados', views.ProductoCosechadoViewSet)
+
+# SISTEMA DE PAGOS: ViewSets para gestión de pedidos y pagos
+router.register(r'pedidos', views.PedidoViewSet)
+router.register(r'pagos', views.PagoViewSet)
+
+# SISTEMA DE VENTAS DE INSUMOS: ViewSets
+router.register(r'ventas/insumos/precios-temporada', PrecioTemporadaViewSet, basename='precio-temporada')
+router.register(r'ventas/insumos/pedidos', PedidoInsumoViewSet, basename='pedido-insumo')
+router.register(r'ventas/insumos/pagos', PagoInsumoViewSet, basename='pago-insumo')
 
 # URLs de la aplicación
 urlpatterns = [
@@ -95,6 +108,13 @@ urlpatterns = [
     path('api/productos-cosechados/crear-rapido/', views.crear_producto_cosechado_rapido, name='crear-producto-cosechado-rapido'),
     path('api/productos-cosechados/buscar-avanzado/', views.buscar_productos_cosechados_avanzado, name='buscar-productos-cosechados-avanzado'),
     path('api/productos-cosechados/reporte-por-periodo/', views.reporte_productos_cosechados_por_periodo, name='reporte-productos-cosechados-por-periodo'),
+
+    # SISTEMA DE PAGOS: Endpoints específicos
+    path('api/historial-ventas/', views.historial_ventas, name='historial-ventas'),
+    path('api/exportar-ventas-csv/', views.exportar_ventas_csv, name='exportar-ventas-csv'),
+
+    # SISTEMA DE VENTAS DE INSUMOS: Endpoints específicos
+    path('api/ventas/insumos/historial/', historial_compras_insumos, name='historial-compras-insumos'),
 
     # Nueva ruta para el endpoint de sesión de depuración
     path('api/auth/debug-session/', views.debug_session_status, name='debug-session'),
