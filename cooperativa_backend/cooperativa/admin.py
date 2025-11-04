@@ -6,7 +6,7 @@ from .models import (
     Usuario, Rol, Comunidad, Socio, Parcela, Cultivo, 
     BitacoraAuditoria, UsuarioRol, Semilla, Pesticida, 
     Fertilizante, Labor, ProductoCosechado, Pedido, 
-    DetallePedido, Pago
+    DetallePedido, Pago, PaymentMethod
 )
 
 # Register your models here.
@@ -1552,3 +1552,235 @@ class PagoAdmin(admin.ModelAdmin):
         return super().get_queryset(request).select_related(
             'pedido__socio__usuario'
         )
+
+
+@admin.register(PaymentMethod)
+class PaymentMethodAdmin(admin.ModelAdmin):
+    """
+    CU16: Administración de métodos de pago en Django Admin
+    Versión corregida con los campos actualizados del modelo
+    """
+    list_display = (
+        'id', 'nombre', 'tipo_badge', 'activo', 'orden', 
+        'creado_por_display', 'creado_en_display'
+    )
+    
+    list_filter = (
+        'tipo', 'activo', 'creado_en'
+    )
+    
+    search_fields = (
+        'nombre', 'descripcion', 'creado_por__usuario', 
+        'creado_por__nombres', 'creado_por__apellidos'
+    )
+    
+    readonly_fields = (
+        'creado_en', 'actualizado_en', 'creado_por_display', 
+        'actualizado_por_display', 'puede_eliminarse_display'
+    )
+    
+    list_editable = ('orden', 'activo')
+    
+    fieldsets = (
+        ('Información Básica', {
+            'fields': ('nombre', 'tipo', 'activo', 'orden')
+        }),
+        ('Descripción y Configuración', {
+            'fields': ('descripcion', 'configuracion'),
+            'classes': ('collapse',)
+        }),
+        ('Auditoría', {
+            'fields': (
+                'creado_por', 'actualizado_por',  # ← CAMBIADO: usar campos reales, no métodos display
+                'creado_en', 'actualizado_en', 'puede_eliminarse_display'
+            ),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = [
+        'activar_metodos',
+        'desactivar_metodos', 
+        'reordenar_secuencialmente',
+        'exportar_metodos_csv',
+        'crear_metodos_por_defecto'
+    ]
+
+    def tipo_badge(self, obj):
+        """Muestra el tipo de método de pago con ícono y color"""
+        tipos_iconos = {
+            'EFECTIVO': '💰',
+            'TRANSFERENCIA': '🏦', 
+            'TARJETA_CREDITO': '💳',
+            'TARJETA_DEBITO': '💳',
+            'CHEQUE': '📄',
+            'DIGITAL': '📱',
+            'OTRO': '🔧'
+        }
+        
+        tipos_colores = {
+            'EFECTIVO': 'green',
+            'TRANSFERENCIA': 'blue',
+            'TARJETA_CREDITO': 'purple',
+            'TARJETA_DEBITO': 'orange',
+            'CHEQUE': 'brown',
+            'DIGITAL': 'teal',
+            'OTRO': 'gray'
+        }
+        
+        icono = tipos_iconos.get(obj.tipo, '❓')
+        color = tipos_colores.get(obj.tipo, 'black')
+        
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{} {}</span>',
+            color,
+            icono,
+            obj.get_tipo_display()
+        )
+    tipo_badge.short_description = 'Tipo'
+    tipo_badge.admin_order_field = 'tipo'
+
+    def creado_en_display(self, obj):
+        """Formatea la fecha de creación para mejor visualización"""
+        if obj.creado_en:
+            return obj.creado_en.strftime('%Y-%m-%d %H:%M')
+        return "-"
+    creado_en_display.short_description = 'Creado'
+    creado_en_display.admin_order_field = 'creado_en'
+
+    def creado_por_display(self, obj):
+        """Muestra información del creador"""
+        if obj.creado_por:
+            return format_html(
+                '{}<br><small style="color: #666;">{}</small>',
+                obj.creado_por.get_full_name() or obj.creado_por.usuario,
+                obj.creado_en.strftime('%Y-%m-%d %H:%M') if obj.creado_en else ''
+            )
+        return "—"
+    creado_por_display.short_description = 'Creado Por'
+
+    def actualizado_por_display(self, obj):
+        """Muestra información del último actualizador"""
+        if obj.actualizado_por:
+            return format_html(
+                '{}<br><small style="color: #666;">{}</small>',
+                obj.actualizado_por.get_full_name() or obj.actualizado_por.usuario,
+                obj.actualizado_en.strftime('%Y-%m-%d %H:%M') if obj.actualizado_en else ''
+            )
+        return "—"
+    actualizado_por_display.short_description = 'Actualizado Por'
+
+    def puede_eliminarse_display(self, obj):
+        """Indica si el método puede ser eliminado"""
+        if obj.puede_eliminarse:
+            return format_html(
+                '<span style="color: green; font-weight: bold;">✅ SÍ</span>'
+            )
+        return format_html(
+            '<span style="color: red; font-weight: bold;">❌ NO (tiene pagos asociados)</span>'
+        )
+    puede_eliminarse_display.short_description = '¿Puede Eliminarse?'
+
+    def activar_metodos(self, request, queryset):
+        """Acción para activar métodos de pago seleccionados"""
+        updated = queryset.update(activo=True)
+        self.message_user(
+            request, 
+            f'{updated} método(s) de pago activado(s).'
+        )
+    activar_metodos.short_description = "🔓 Activar métodos seleccionados"
+
+    def desactivar_metodos(self, request, queryset):
+        """Acción para desactivar métodos de pago seleccionados"""
+        updated = queryset.update(activo=False)
+        self.message_user(
+            request, 
+            f'{updated} método(s) de pago desactivado(s).'
+        )
+    desactivar_metodos.short_description = "🔒 Desactivar métodos seleccionados"
+
+    def reordenar_secuencialmente(self, request, queryset):
+        """Acción para reordenar métodos de pago secuencialmente"""
+        metodos = queryset.order_by('orden', 'nombre')
+        for index, metodo in enumerate(metodos, start=1):
+            metodo.orden = index
+            metodo.save(update_fields=['orden'])
+        
+        self.message_user(
+            request, 
+            f'{metodos.count()} método(s) de pago reordenado(s) secuencialmente.'
+        )
+    reordenar_secuencialmente.short_description = "🔄 Reordenar secuencialmente"
+
+    def exportar_metodos_csv(self, request, queryset):
+        """Exportar métodos de pago seleccionados a CSV"""
+        import csv
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="metodos_pago_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Nombre', 'Tipo', 'Activo', 'Orden', 'Descripción',
+            'Creado Por', 'Fecha Creación', 'Actualizado Por', 'Fecha Actualización'
+        ])
+
+        for metodo in queryset:
+            writer.writerow([
+                metodo.id,
+                metodo.nombre,
+                metodo.get_tipo_display(),
+                'Sí' if metodo.activo else 'No',
+                metodo.orden,
+                metodo.descripcion or '',
+                metodo.creado_por.get_full_name() if metodo.creado_por else '',
+                metodo.creado_en.strftime('%Y-%m-%d %H:%M') if metodo.creado_en else '',
+                metodo.actualizado_por.get_full_name() if metodo.actualizado_por else '',
+                metodo.actualizado_en.strftime('%Y-%m-%d %H:%M') if metodo.actualizado_en else ''
+            ])
+
+        self.message_user(request, f'Exportados {queryset.count()} métodos de pago a CSV.')
+        return response
+    exportar_metodos_csv.short_description = "📄 Exportar a CSV"
+
+    def crear_metodos_por_defecto(self, request, queryset):
+        """Acción para crear métodos de pago por defecto"""
+        from django.core.management import call_command
+        try:
+            call_command('seed_payment_methods')
+            self.message_user(request, '✅ Métodos de pago por defecto creados exitosamente.')
+        except Exception as e:
+            self.message_user(request, f'❌ Error al crear métodos por defecto: {str(e)}', level='ERROR')
+    crear_metodos_por_defecto.short_description = "🌱 Crear métodos por defecto"
+
+    def get_queryset(self, request):
+        """Optimizar consultas relacionadas"""
+        return super().get_queryset(request).select_related(
+            'creado_por', 'actualizado_por'
+        ).order_by('orden', 'nombre')
+
+    def save_model(self, request, obj, form, change):
+        """Asignar automáticamente el usuario actual al crear/actualizar"""
+        if not change:
+            # Es un nuevo registro
+            obj.creado_por = request.user
+        else:
+            # Es una actualización
+            obj.actualizado_por = request.user
+        
+        super().save_model(request, obj, form, change)
+
+    def get_readonly_fields(self, request, obj=None):
+        """Campos de solo lectura - versión simplificada"""
+        if obj and not obj.puede_eliminarse:
+            # Si no se puede eliminar, mostrar advertencia pero no hacer todos los campos readonly
+            return list(self.readonly_fields) + ['puede_eliminarse_display']
+        return self.readonly_fields
+
+    def has_delete_permission(self, request, obj=None):
+        """Permitir eliminar solo si puede_eliminarse es True"""
+        if obj and not obj.puede_eliminarse:
+            return False
+        return super().has_delete_permission(request, obj)
