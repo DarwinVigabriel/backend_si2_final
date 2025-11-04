@@ -4,6 +4,7 @@ from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, Permis
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator, MinValueValidator, MaxValueValidator
+from django.conf import settings
 from decimal import Decimal
 import re
 import json
@@ -3476,3 +3477,139 @@ class PagoInsumo(models.Model):
                 raise ValidationError(
                     f'El monto ({self.monto}) excede el saldo pendiente ({saldo_pendiente})'
                 )
+
+class PaymentMethod(models.Model):
+    """CU16: Modelo para gestión de métodos de pago"""
+    
+    TIPOS_METODO_PAGO = [
+        ('EFECTIVO', 'Efectivo'),
+        ('TRANSFERENCIA', 'Transferencia Bancaria'),
+        ('TARJETA_CREDITO', 'Tarjeta de Crédito'),
+        ('TARJETA_DEBITO', 'Tarjeta de Débito'),
+        ('CHEQUE', 'Cheque'),
+        ('DIGITAL', 'Pago Digital'),
+        ('OTRO', 'Otro'),
+    ]
+    
+    tipo = models.CharField(
+        max_length=20,
+        choices=TIPOS_METODO_PAGO,
+        help_text='Tipo de método de pago: '
+    )
+    nombre = models.CharField(
+        max_length=100,
+        unique=True,
+        validators=[RegexValidator(
+            regex=r'^[a-zA-ZÀ-ÿ0-9\s\-\.\(\)]+$',
+            message='Nombre solo puede contener letras, números, espacios, guiones, puntos y paréntesis'
+        )],
+        help_text='Nombre único del método de pago (ej: Efectivo, Transferencia BBVA, etc.)'
+    )
+    activo = models.BooleanField(
+        default=True,
+        help_text='Indica si el método de pago está disponible para usar'
+    )
+    descripcion = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Descripción adicional del método de pago'
+    )
+    configuracion = models.JSONField(
+        blank=True,
+        null=True,
+        help_text='Configuración específica del método de pago (campos variables)'
+    )
+    orden = models.PositiveIntegerField(
+        default=0,
+        help_text='Orden de visualización (menor número aparece primero)'
+    )
+    # ← AGREGA ESTOS CAMPOS QUE FALTAN
+    creado_en = models.DateTimeField(default=timezone.now)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='metodos_pago_creados',
+        help_text='Usuario que creó el método de pago'
+    )
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='metodos_pago_actualizados',
+        help_text='Usuario que actualizó por última vez'
+    )
+       
+    class Meta:
+        db_table = 'payment_method'
+        verbose_name = 'Método de Pago'
+        verbose_name_plural = 'Métodos de Pago'
+        ordering = ['orden', 'nombre']
+        permissions = [
+            ('gestionar_metodo_pago', 'Puede gestionar métodos de pago'),
+        ]
+
+    def __str__(self):
+        estado = "✅" if self.activo else "❌"
+        return f"{estado} {self.nombre} ({self.get_tipo_display()})"
+
+    def clean(self):
+        """Validaciones adicionales del modelo"""
+        # Validar que el nombre sea único (case insensitive)
+        if PaymentMethod.objects.filter(
+            nombre__iexact=self.nombre
+        ).exclude(pk=self.pk).exists():
+            raise ValidationError({'nombre': 'Ya existe un método de pago con este nombre'})
+
+        # Validar configuración específica por tipo
+        if self.tipo in ['TARJETA_CREDITO', 'TARJETA_DEBITO'] and self.configuracion:
+            required_fields = ['procesador', 'comision_porcentaje']
+            for field in required_fields:
+                if field not in self.configuracion:
+                    raise ValidationError({
+                        'configuracion': f'Para tarjetas, el campo {field} es requerido'
+                    })
+
+    def save(self, *args, **kwargs):
+        """Override save para ejecutar validaciones y lógica adicional"""
+        self.full_clean()
+        
+        # Si es un nuevo registro y no tiene orden asignado, asignar el último + 1
+        if not self.pk and self.orden == 0:
+            ultimo_orden = PaymentMethod.objects.aggregate(
+                models.Max('orden')
+            )['orden__max'] or 0
+            self.orden = ultimo_orden + 1
+        
+        super().save(*args, **kwargs)
+
+    @property
+    def puede_eliminarse(self):
+        """Verifica si el método de pago puede ser eliminado"""
+        # Por ahora, simplificamos la lógica
+        # En una implementación real verificarías pagos asociados
+        return not self.activo
+
+    def activar(self):
+        """Activa el método de pago"""
+        self.activo = True
+        self.save(update_fields=['activo', 'actualizado_en'])
+
+    def desactivar(self):
+        """Desactiva el método de pago"""
+        self.activo = False
+        self.save(update_fields=['activo', 'actualizado_en'])
+
+    @classmethod
+    def obtener_metodos_activos(cls):
+        """Método de clase para obtener métodos de pago activos"""
+        return cls.objects.filter(activo=True).order_by('orden', 'nombre')
+
+    @classmethod
+    def obtener_por_tipo(cls, tipo):
+        """Método de clase para obtener métodos por tipo"""
+        return cls.objects.filter(tipo=tipo, activo=True).order_by('orden', 'nombre')
