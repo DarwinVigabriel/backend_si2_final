@@ -9,7 +9,7 @@ from .models import (
     Semilla, Pesticida, Fertilizante,
     Campaign, CampaignPartner, CampaignPlot, Labor, ProductoCosechado,
     Pedido, DetallePedido, Pago,
-    PrecioTemporada, PedidoInsumo, DetallePedidoInsumo, PagoInsumo
+    PrecioTemporada, PedidoInsumo, DetallePedidoInsumo, PagoInsumo, PaymentMethod
 )
 
 
@@ -2148,3 +2148,237 @@ class HistorialComprasInsumosSerializer(serializers.Serializer):
             })
 
         return data
+
+class PaymentMethodSerializer(serializers.ModelSerializer):
+    """CU16: Serializer para gestión de métodos de pago"""
+    
+    # Campos calculados y de estado
+    puede_eliminarse = serializers.SerializerMethodField()
+    creado_por_nombre = serializers.CharField(source='creado_por.get_full_name', read_only=True)
+    actualizado_por_nombre = serializers.CharField(source='actualizado_por.get_full_name', read_only=True)
+    tipo_display = serializers.CharField(source='get_tipo_display', read_only=True)
+    
+    class Meta:
+        model = PaymentMethod
+        fields = [
+            'id', 'tipo', 'tipo_display', 'nombre', 'activo', 'descripcion',
+            'configuracion', 'orden', 'creado_en', 'actualizado_en',
+            'creado_por', 'creado_por_nombre', 'actualizado_por', 'actualizado_por_nombre',
+            # Campos calculados
+            'puede_eliminarse'
+        ]
+        read_only_fields = [
+            'id', 'creado_en', 'actualizado_en', 'creado_por', 'actualizado_por',
+            'creado_por_nombre', 'actualizado_por_nombre', 'puede_eliminarse', 'tipo_display'
+        ]
+
+    def get_puede_eliminarse(self, obj):
+        """Campo calculado para saber si puede eliminarse"""
+        return obj.puede_eliminarse
+
+    def validate_nombre(self, value):
+        """Validación específica del nombre"""
+        if not value or value.strip() == '':
+            raise serializers.ValidationError('El nombre no puede estar vacío')
+        
+        # Validar longitud
+        if len(value) < 2:
+            raise serializers.ValidationError('El nombre debe tener al menos 2 caracteres')
+        if len(value) > 100:
+            raise serializers.ValidationError('El nombre no puede exceder los 100 caracteres')
+        
+        # Validar formato con regex (mismo que en el modelo)
+        import re
+        pattern = r'^[a-zA-ZÀ-ÿ0-9\s\-\.\(\)]+$'
+        if not re.match(pattern, value):
+            raise serializers.ValidationError(
+                'Nombre solo puede contener letras, números, espacios, guiones, puntos y paréntesis'
+            )
+        
+        return value.strip()
+
+    def validate_orden(self, value):
+        """Validación del orden"""
+        if value < 0:
+            raise serializers.ValidationError('El orden no puede ser negativo')
+        if value > 1000:
+            raise serializers.ValidationError('El orden no puede ser mayor a 1000')
+        return value
+
+    def validate_configuracion(self, value):
+        """Validación de la configuración JSON"""
+        if value is not None:
+            if not isinstance(value, dict):
+                raise serializers.ValidationError('La configuración debe ser un objeto JSON válido')
+            
+            # Validar que no exceda un tamaño razonable
+            import json
+            if len(json.dumps(value)) > 1000:
+                raise serializers.ValidationError('La configuración es demasiado grande')
+        
+        return value
+
+    def validate(self, data):
+        """Validaciones entre campos"""
+        tipo = data.get('tipo')
+        configuracion = data.get('configuracion')
+        
+        # Si estamos actualizando, obtener los valores actuales para los campos no proporcionados
+        if self.instance:
+            if tipo is None:
+                tipo = self.instance.tipo
+            if configuracion is None:
+                configuracion = self.instance.configuracion
+
+        # Validar configuración específica por tipo
+        if tipo in ['TARJETA_CREDITO', 'TARJETA_DEBITO'] and configuracion:
+            required_fields = ['procesador', 'comision_porcentaje']
+            for field in required_fields:
+                if field not in configuracion:
+                    raise serializers.ValidationError({
+                        'configuracion': f'Para métodos de tipo {tipo}, el campo "{field}" es requerido en la configuración'
+                    })
+            
+            # Validar que la comisión sea un porcentaje válido
+            comision = configuracion.get('comision_porcentaje')
+            if comision is not None:
+                try:
+                    comision_float = float(comision)
+                    if comision_float < 0 or comision_float > 100:
+                        raise serializers.ValidationError({
+                            'configuracion': 'La comisión porcentual debe estar entre 0 y 100'
+                        })
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({
+                        'configuracion': 'La comisión porcentual debe ser un número válido'
+                    })
+
+        # Validar nombre único (case insensitive)
+        nombre = data.get('nombre')
+        if nombre:
+            # Excluir la instancia actual si estamos actualizando
+            exclude_kwargs = {}
+            if self.instance:
+                exclude_kwargs['pk'] = self.instance.pk
+            
+            if PaymentMethod.objects.filter(nombre__iexact=nombre).exclude(**exclude_kwargs).exists():
+                raise serializers.ValidationError({
+                    'nombre': 'Ya existe un método de pago con este nombre'
+                })
+
+        return data
+
+    def create(self, validated_data):
+        """Override create para manejar lógica adicional"""
+        # Llamar al save normal del modelo
+        instance = super().create(validated_data)
+        
+        # Log de creación (podrías integrar con tu sistema de logs)
+        print(f"Método de pago creado: {instance.nombre}")
+        
+        return instance
+
+    def update(self, instance, validated_data):
+        """Override update para manejar lógica adicional"""
+        # Guardar el nombre anterior para el log
+        nombre_anterior = instance.nombre
+        
+        # Actualizar la instancia
+        instance = super().update(instance, validated_data)
+        
+        # Log de actualización
+        if nombre_anterior != instance.nombre:
+            print(f"Método de pago renombrado: {nombre_anterior} -> {instance.nombre}")
+        
+        return instance
+
+
+class PaymentMethodActivationSerializer(serializers.Serializer):
+    """Serializer específico para activar/desactivar métodos de pago"""
+    activo = serializers.BooleanField(required=True)
+    
+    def update(self, instance, validated_data):
+        """Actualizar solo el estado activo"""
+        activo = validated_data.get('activo')
+        
+        if activo:
+            instance.activar()
+        else:
+            instance.desactivar()
+        
+        return instance
+
+
+class PaymentMethodListSerializer(serializers.ModelSerializer):
+    """Serializer simplificado para listado de métodos de pago"""
+    tipo_display = serializers.CharField(source='get_tipo_display', read_only=True)
+    
+    class Meta:
+        model = PaymentMethod
+        fields = [
+            'id', 'tipo', 'tipo_display', 'nombre', 'activo', 'orden', 
+            'descripcion', 'creado_en'
+        ]
+        read_only_fields = fields
+
+
+class PaymentMethodDropdownSerializer(serializers.ModelSerializer):
+    """Serializer ultra simplificado para dropdowns/selects"""
+    tipo_display = serializers.CharField(source='get_tipo_display', read_only=True)
+    
+    class Meta:
+        model = PaymentMethod
+        fields = ['id', 'nombre', 'tipo', 'tipo_display', 'orden']
+        read_only_fields = fields
+
+
+class PaymentMethodBulkUpdateSerializer(serializers.Serializer):
+    """Serializer para actualización masiva de órdenes"""
+    metodos = serializers.ListField(
+        child=serializers.DictField(),
+        required=True
+    )
+    
+    def validate_metodos(self, value):
+        """Validar la lista de métodos para actualización masiva"""
+        if not value:
+            raise serializers.ValidationError('La lista de métodos no puede estar vacía')
+        
+        for metodo_data in value:
+            if 'id' not in metodo_data:
+                raise serializers.ValidationError('Cada método debe incluir un ID')
+            if 'orden' not in metodo_data:
+                raise serializers.ValidationError('Cada método debe incluir un orden')
+            
+            # Validar que el ID existe
+            try:
+                PaymentMethod.objects.get(id=metodo_data['id'])
+            except PaymentMethod.DoesNotExist:
+                raise serializers.ValidationError(f"Método de pago con ID {metodo_data['id']} no existe")
+            
+            # Validar que el orden es válido
+            if metodo_data['orden'] < 0:
+                raise serializers.ValidationError('El orden no puede ser negativo')
+        
+        return value
+    
+    def save(self, **kwargs):
+        """Guardar los cambios de orden masivos"""
+        metodos_data = self.validated_data['metodos']
+        
+        for metodo_data in metodos_data:
+            metodo = PaymentMethod.objects.get(id=metodo_data['id'])
+            metodo.orden = metodo_data['orden']
+            metodo.save(update_fields=['orden', 'actualizado_en'])
+        
+        return {'actualizados': len(metodos_data)}
+
+
+# Serializer para estadísticas (opcional)
+class PaymentMethodStatsSerializer(serializers.Serializer):
+    """Serializer para estadísticas de métodos de pago"""
+    total_metodos = serializers.IntegerField()
+    metodos_activos = serializers.IntegerField()
+    metodos_inactivos = serializers.IntegerField()
+    por_tipo = serializers.DictField()
+    ultimos_creados = PaymentMethodListSerializer(many=True)   
