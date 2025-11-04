@@ -3,7 +3,7 @@ from django.http import HttpResponse
 from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny, BasePermission
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import OrderingFilter
 from django.contrib.auth import authenticate, login, logout
@@ -12,8 +12,10 @@ from django.middleware.csrf import get_token
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.db.models import Q, Count, Sum, Avg, F, Case, When, DecimalField
-from django.db.models.functions import TruncMonth
+from django.db.models.functions import TruncMonth, Coalesce
 from django.contrib.sessions.models import Session
+from django.core.exceptions import PermissionDenied
+from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
 import csv
 from datetime import datetime, timedelta
@@ -23,7 +25,7 @@ from .models import (
     CicloCultivo, Cosecha, Tratamiento, AnalisisSuelo, TransferenciaParcela,
     Semilla, Pesticida, Fertilizante, Labor, ProductoCosechado,
     Pedido, DetallePedido, Pago,
-    PrecioTemporada, PedidoInsumo, DetallePedidoInsumo, PagoInsumo
+    PrecioTemporada, PedidoInsumo, DetallePedidoInsumo, PagoInsumo, PaymentMethod
 )
 from .models import Campaign, CampaignPartner, CampaignPlot
 from .serializers import (
@@ -36,7 +38,8 @@ from .serializers import (
     CampaignSerializer, CampaignListSerializer, LaborSerializer, LaborListSerializer, LaborCreateSerializer, LaborUpdateSerializer, ProductoCosechadoSerializer, ProductoCosechadoListSerializer,
     ProductoCosechadoCambiarEstadoSerializer, ProductoCosechadoCreateSerializer, ProductoCosechadoUpdateSerializer, ProductoCosechadoVenderSerializer,
     PedidoSerializer, PedidoCreateSerializer, PagoSerializer, PagoCreateSerializer, PagoStripeSerializer, HistorialVentasSerializer, DetallePedidoSerializer,
-    PrecioTemporadaSerializer, PedidoInsumoSerializer, PedidoInsumoCreateSerializer, DetallePedidoInsumoSerializer, PagoInsumoSerializer, HistorialComprasInsumosSerializer
+    PrecioTemporadaSerializer, PedidoInsumoSerializer, PedidoInsumoCreateSerializer, DetallePedidoInsumoSerializer, PagoInsumoSerializer, HistorialComprasInsumosSerializer,
+    PaymentMethodActivationSerializer, PaymentMethodBulkUpdateSerializer, PaymentMethodDropdownSerializer, PaymentMethodListSerializer, PaymentMethodSerializer, PaymentMethodStatsSerializer
 )
 from .reports import CampaignReports
 
@@ -5612,3 +5615,553 @@ def historial_compras_insumos(request):
         'estadisticas': {'total_pedidos': total_pedidos, 'total_gastado': str(total_gastado)},
         'results': PedidoInsumoSerializer(pedidos, many=True).data
     })
+
+class TienePermisoMetodoPago(BasePermission):
+    """
+    CU16: Permiso personalizado para gestión de métodos de pago
+    Solo usuarios con el permiso 'gestionar_metodo_pago' pueden acceder
+    """
+    
+    def has_permission(self, request, view):
+        # Verificar autenticación primero
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Lista de acciones que requieren el permiso específico
+        acciones_protegidas = [
+            'create', 'update', 'partial_update', 'destroy',
+            'activar_desactivar', 'reordenar', 'estadisticas',
+            'validar_eliminacion'
+        ]
+        
+        # Para acciones de solo lectura (list, retrieve), permitir más flexibilidad
+        if view.action in ['list', 'retrieve']:
+            return True
+            
+        # Para acciones de modificación, verificar permiso específico
+        if view.action in acciones_protegidas:
+            return self._tiene_permiso_metodo_pago(request.user)
+            
+        # Por defecto, requerir el permiso
+        return self._tiene_permiso_metodo_pago(request.user)
+    
+    def has_object_permission(self, request, view, obj):
+        # Misma lógica para permisos a nivel de objeto
+        return self.has_permission(request, view)
+    
+    def _tiene_permiso_metodo_pago(self, user):
+        """Verifica si el usuario tiene el permiso de gestionar métodos de pago"""
+        try:
+            # Verificar permiso específico
+            if user.has_perm('tu_app.gestionar_metodo_pago'):
+                return True
+                
+            # Permitir superusuarios
+            if user.is_superuser:
+                return True
+                
+            # Verificar si tiene permisos a través de grupos
+            if user.groups.filter(permissions__codename='gestionar_metodo_pago').exists():
+                return True
+                
+            return False
+            
+        except Exception:
+            # En caso de error, denegar por seguridad
+            return False
+
+
+class SoloLecturaMetodoPago(BasePermission):
+    """
+    CU16: Permiso que permite lectura a todos los autenticados
+    pero escritura solo a usuarios con permisos específicos
+    """
+    
+    def has_permission(self, request, view):
+        # Siempre permitir métodos seguros (GET, HEAD, OPTIONS)
+        if request.method in ['GET', 'HEAD', 'OPTIONS']:
+            return True
+            
+        # Para métodos que modifican datos, requerir permiso específico
+        return TienePermisoMetodoPago().has_permission(request, view)
+
+
+# =============================================================================
+# PAGINACIÓN
+# =============================================================================
+
+class PaymentMethodPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+# =============================================================================
+# VIEWSETS PARA CU16 - GESTIÓN DE MÉTODOS DE PAGO
+# =============================================================================
+
+class PaymentMethodViewSet(viewsets.ModelViewSet):
+    """
+    CU16: ViewSet para gestión completa de métodos de pago
+    T061: Modelo y migración payment_method
+    T062: API CRUD métodos de pago (DRF) + regla nombre único
+    T063: UI admin métodos de pago (crear/editar/activar)
+    """
+    queryset = PaymentMethod.objects.all()
+    serializer_class = PaymentMethodSerializer
+    permission_classes = [IsAuthenticated, TienePermisoMetodoPago]
+    filter_backends = [OrderingFilter, DjangoFilterBackend]
+    ordering_fields = ['nombre', 'tipo', 'orden', 'activo', 'creado_en']
+    ordering = ['orden', 'nombre']  # Orden por defecto: orden, luego nombre
+    pagination_class = PaymentMethodPagination
+    filterset_fields = ['tipo', 'activo']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtros de búsqueda personalizados
+        nombre = self.request.query_params.get('nombre', '').strip()
+        descripcion = self.request.query_params.get('descripcion', '').strip()
+        creado_por = self.request.query_params.get('creado_por')
+        fecha_creacion_desde = self.request.query_params.get('fecha_creacion_desde')
+        fecha_creacion_hasta = self.request.query_params.get('fecha_creacion_hasta')
+        solo_activos = self.request.query_params.get('solo_activos')
+
+        if nombre:
+            queryset = queryset.filter(nombre__icontains=nombre)
+        if descripcion:
+            queryset = queryset.filter(descripcion__icontains=descripcion)
+        if creado_por:
+            queryset = queryset.filter(creado_por__id=creado_por)
+        if fecha_creacion_desde:
+            queryset = queryset.filter(creado_en__date__gte=fecha_creacion_desde)
+        if fecha_creacion_hasta:
+            queryset = queryset.filter(creado_en__date__lte=fecha_creacion_hasta)
+        if solo_activos and solo_activos.lower() == 'true':
+            queryset = queryset.filter(activo=True)
+
+        return queryset.select_related('creado_por', 'actualizado_por')
+
+    def get_serializer_class(self):
+        """Seleccionar serializer según la acción"""
+        if self.action == 'list':
+            return PaymentMethodListSerializer
+        return PaymentMethodSerializer
+
+    def perform_create(self, serializer):
+        """Registrar creación en bitácora"""
+        metodo_pago = serializer.save()
+        
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='CREAR_METODO_PAGO',
+            tabla_afectada='PaymentMethod',
+            registro_id=metodo_pago.id,
+            detalles={
+                'metodo_pago': metodo_pago.nombre,
+                'tipo': metodo_pago.tipo,
+                'activo': metodo_pago.activo
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_update(self, serializer):
+        """Registrar actualización en bitácora"""
+        metodo_pago = serializer.save()
+        
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ACTUALIZAR_METODO_PAGO',
+            tabla_afectada='PaymentMethod',
+            registro_id=metodo_pago.id,
+            detalles={
+                'metodo_pago': metodo_pago.nombre,
+                'tipo': metodo_pago.tipo,
+                'activo': metodo_pago.activo
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def perform_destroy(self, instance):
+        """Registrar eliminación en bitácora y validar"""
+        # Validar que no tenga pagos asociados antes de eliminar
+        if not instance.puede_eliminarse:
+            raise PermissionDenied(
+                f"No se puede eliminar el método de pago '{instance.nombre}' porque tiene pagos asociados."
+            )
+        
+        BitacoraAuditoria.objects.create(
+            usuario=self.request.user,
+            accion='ELIMINAR_METODO_PAGO',
+            tabla_afectada='PaymentMethod',
+            registro_id=instance.id,
+            detalles={
+                'metodo_pago': instance.nombre,
+                'tipo': instance.tipo
+            },
+            ip_address=get_client_ip(self.request),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def activar_desactivar(self, request, pk=None):
+        """
+        CU16: Activar o desactivar método de pago
+        """
+        metodo_pago = self.get_object()
+        
+        serializer = PaymentMethodActivationSerializer(
+            metodo_pago, 
+            data=request.data, 
+            partial=True
+        )
+        
+        if serializer.is_valid():
+            serializer.save()
+            
+            # Registrar en bitácora
+            accion_bitacora = 'ACTIVAR_METODO_PAGO' if metodo_pago.activo else 'DESACTIVAR_METODO_PAGO'
+            mensaje = f'Método de pago "{metodo_pago.nombre}" {"activado" if metodo_pago.activo else "desactivado"}'
+            
+            BitacoraAuditoria.objects.create(
+                usuario=request.user,
+                accion=accion_bitacora,
+                tabla_afectada='PaymentMethod',
+                registro_id=metodo_pago.id,
+                detalles={
+                    'metodo_pago': metodo_pago.nombre,
+                    'nuevo_estado': metodo_pago.activo
+                },
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+
+            return Response({
+                'mensaje': mensaje,
+                'metodo_pago': PaymentMethodSerializer(metodo_pago).data
+            })
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'])
+    def activos(self, request):
+        """
+        CU16: Obtener solo métodos de pago activos
+        """
+        metodos_activos = self.get_queryset().filter(activo=True)
+        
+        page = self.paginate_queryset(metodos_activos)
+        if page is not None:
+            serializer = PaymentMethodListSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = PaymentMethodListSerializer(metodos_activos, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def dropdown(self, request):
+        """
+        CU16: Obtener métodos de pago para dropdown/select
+        """
+        metodos = self.get_queryset().filter(activo=True).order_by('orden', 'nombre')
+        serializer = PaymentMethodDropdownSerializer(metodos, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def reordenar(self, request):
+        """
+        CU16: Reordenar múltiples métodos de pago
+        """
+        serializer = PaymentMethodBulkUpdateSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            resultado = serializer.save()
+            
+            # Registrar en bitácora
+            BitacoraAuditoria.objects.create(
+                usuario=request.user,
+                accion='REORDENAR_METODOS_PAGO',
+                tabla_afectada='PaymentMethod',
+                registro_id=None,
+                detalles={
+                    'metodos_actualizados': resultado['actualizados'],
+                    'nuevo_orden': request.data.get('metodos', [])
+                },
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            
+            return Response({
+                'mensaje': f'{resultado["actualizados"]} métodos de pago reordenados',
+                'actualizados': resultado['actualizados']
+            })
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'])
+    def estadisticas(self, request):
+        """
+        CU16: Obtener estadísticas de métodos de pago
+        """
+        total_metodos = PaymentMethod.objects.count()
+        metodos_activos = PaymentMethod.objects.filter(activo=True).count()
+        metodos_inactivos = PaymentMethod.objects.filter(activo=False).count()
+        
+        # Métodos por tipo
+        por_tipo = PaymentMethod.objects.values('tipo').annotate(
+            total=Count('id'),
+            activos=Count('id', filter=Q(activo=True)),
+            inactivos=Count('id', filter=Q(activo=False))
+        ).order_by('tipo')
+        
+        # Últimos métodos creados
+        ultimos_creados = PaymentMethod.objects.select_related('creado_por').order_by('-creado_en')[:5]
+        
+        return Response({
+            'resumen': {
+                'total_metodos': total_metodos,
+                'metodos_activos': metodos_activos,
+                'metodos_inactivos': metodos_inactivos,
+                'porcentaje_activos': round((metodos_activos / total_metodos * 100) if total_metodos > 0 else 0, 2)
+            },
+            'por_tipo': list(por_tipo),
+            'ultimos_creados': PaymentMethodListSerializer(ultimos_creados, many=True).data
+        })
+
+    @action(detail=True, methods=['get'])
+    def validar_eliminacion(self, request, pk=None):
+        """
+        CU16: Validar si un método de pago puede ser eliminado
+        """
+        metodo_pago = self.get_object()
+        
+        return Response({
+            'puede_eliminarse': metodo_pago.puede_eliminarse,
+            'metodo_pago': {
+                'id': metodo_pago.id,
+                'nombre': metodo_pago.nombre,
+                'activo': metodo_pago.activo,
+                'tipo': metodo_pago.tipo
+            },
+            'mensaje': 'Puede ser eliminado' if metodo_pago.puede_eliminarse else 'No puede ser eliminado (tiene pagos asociados o está activo)'
+        })
+
+
+# =============================================================================
+# VISTAS BASADAS EN FUNCIONES PARA CU16
+# =============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, TienePermisoMetodoPago])
+def metodos_pago_activos(request):
+    """Vista para obtener solo métodos de pago activos"""
+    metodos = PaymentMethod.obtener_metodos_activos()
+    serializer = PaymentMethodListSerializer(metodos, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def metodos_pago_dropdown(request):
+    """Vista para obtener métodos de pago para dropdown (pública para autenticados)"""
+    metodos = PaymentMethod.obtener_metodos_activos()
+    serializer = PaymentMethodDropdownSerializer(metodos, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, TienePermisoMetodoPago])
+def activar_desactivar_metodo_pago(request, pk):
+    """Vista para activar/desactivar método de pago específico"""
+    try:
+        metodo_pago = PaymentMethod.objects.get(pk=pk)
+    except PaymentMethod.DoesNotExist:
+        return Response(
+            {'error': 'Método de pago no encontrado'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    serializer = PaymentMethodActivationSerializer(
+        metodo_pago, 
+        data=request.data, 
+        partial=True
+    )
+    
+    if serializer.is_valid():
+        serializer.save()
+        
+        # Registrar en bitácora
+        accion_bitacora = 'ACTIVAR_METODO_PAGO' if metodo_pago.activo else 'DESACTIVAR_METODO_PAGO'
+        mensaje = f'Método de pago "{metodo_pago.nombre}" {"activado" if metodo_pago.activo else "desactivado"}'
+        
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion=accion_bitacora,
+            tabla_afectada='PaymentMethod',
+            registro_id=metodo_pago.id,
+            detalles={
+                'metodo_pago': metodo_pago.nombre,
+                'nuevo_estado': metodo_pago.activo
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'mensaje': mensaje,
+            'metodo_pago': PaymentMethodSerializer(metodo_pago).data
+        })
+    
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, TienePermisoMetodoPago])
+def reordenar_metodos_pago(request):
+    """Vista para reordenar múltiples métodos de pago"""
+    serializer = PaymentMethodBulkUpdateSerializer(data=request.data)
+    
+    if serializer.is_valid():
+        resultado = serializer.save()
+        
+        # Registrar en bitácora
+        BitacoraAuditoria.objects.create(
+            usuario=request.user,
+            accion='REORDENAR_METODOS_PAGO',
+            tabla_afectada='PaymentMethod',
+            registro_id=None,
+            detalles={
+                'metodos_actualizados': resultado['actualizados'],
+                'nuevo_orden': request.data.get('metodos', [])
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'mensaje': f'{resultado["actualizados"]} métodos de pago reordenados exitosamente',
+            'actualizados': resultado['actualizados']
+        })
+    
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, TienePermisoMetodoPago])
+def estadisticas_metodos_pago(request):
+    """Vista para obtener estadísticas de métodos de pago"""
+    total_metodos = PaymentMethod.objects.count()
+    metodos_activos = PaymentMethod.objects.filter(activo=True).count()
+    metodos_inactivos = PaymentMethod.objects.filter(activo=False).count()
+    
+    # Métodos por tipo
+    por_tipo = PaymentMethod.objects.values('tipo').annotate(
+        total=Count('id'),
+        activos=Count('id', filter=Q(activo=True)),
+        inactivos=Count('id', filter=Q(activo=False))
+    ).order_by('tipo')
+    
+    # Últimos métodos creados
+    ultimos_creados = PaymentMethod.objects.select_related('creado_por').order_by('-creado_en')[:5]
+    
+    # Métodos más utilizados (esto sería con datos reales de pagos)
+    # Por ahora es un placeholder
+    metodos_populares = PaymentMethod.objects.filter(activo=True).order_by('-orden')[:3]
+    
+    return Response({
+        'resumen': {
+            'total_metodos': total_metodos,
+            'metodos_activos': metodos_activos,
+            'metodos_inactivos': metodos_inactivos,
+            'porcentaje_activos': round((metodos_activos / total_metodos * 100) if total_metodos > 0 else 0, 2)
+        },
+        'por_tipo': list(por_tipo),
+        'ultimos_creados': PaymentMethodListSerializer(ultimos_creados, many=True).data,
+        'metodos_populares': PaymentMethodDropdownSerializer(metodos_populares, many=True).data
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, TienePermisoMetodoPago])
+def buscar_metodos_pago_avanzado(request):
+    """Vista para búsqueda avanzada de métodos de pago"""
+    queryset = PaymentMethod.objects.all()
+    
+    # Aplicar filtros
+    nombre = request.query_params.get('nombre', '').strip()
+    tipo = request.query_params.get('tipo', '').strip()
+    activo = request.query_params.get('activo')
+    creado_por = request.query_params.get('creado_por')
+    fecha_creacion_desde = request.query_params.get('fecha_creacion_desde')
+    fecha_creacion_hasta = request.query_params.get('fecha_creacion_hasta')
+    
+    if nombre:
+        queryset = queryset.filter(nombre__icontains=nombre)
+    if tipo:
+        queryset = queryset.filter(tipo=tipo)
+    if activo is not None:
+        queryset = queryset.filter(activo=activo.lower() == 'true')
+    if creado_por:
+        queryset = queryset.filter(creado_por__id=creado_por)
+    if fecha_creacion_desde:
+        queryset = queryset.filter(creado_en__date__gte=fecha_creacion_desde)
+    if fecha_creacion_hasta:
+        queryset = queryset.filter(creado_en__date__lte=fecha_creacion_hasta)
+    
+    # Ordenamiento
+    orden = request.query_params.get('orden', 'orden,nombre')
+    if orden:
+        queryset = queryset.order_by(*orden.split(','))
+    
+    # Paginación
+    paginator = PaymentMethodPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    
+    if page is not None:
+        serializer = PaymentMethodListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+    
+    serializer = PaymentMethodListSerializer(queryset, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, TienePermisoMetodoPago])
+def validar_eliminacion_metodo_pago(request, pk):
+    """Vista para validar si un método de pago puede ser eliminado"""
+    try:
+        metodo_pago = PaymentMethod.objects.get(pk=pk)
+    except PaymentMethod.DoesNotExist:
+        return Response(
+            {'error': 'Método de pago no encontrado'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    return Response({
+        'puede_eliminarse': metodo_pago.puede_eliminarse,
+        'metodo_pago': {
+            'id': metodo_pago.id,
+            'nombre': metodo_pago.nombre,
+            'activo': metodo_pago.activo,
+            'tipo': metodo_pago.tipo
+        },
+        'mensaje': 'Puede ser eliminado' if metodo_pago.puede_eliminarse else 'No puede ser eliminado (tiene pagos asociados o está activo)'
+    })
+
+
+# =============================================================================
+# FUNCIONES AUXILIARES
+# =============================================================================
+
+def get_client_ip(request):
+    """Obtener IP del cliente"""
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(',')[0]
+    else:
+        ip = request.META.get('REMOTE_ADDR')
+    return ip
+
