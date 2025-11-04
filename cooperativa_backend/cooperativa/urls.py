@@ -41,6 +41,9 @@ router.register(r'labores', views.LaborViewSet)
 # CU15: ViewSet para gestión de productos cosechados
 router.register(r'productos-cosechados', views.ProductoCosechadoViewSet)
 
+# CU16: ViewSet para gestión de métodos de pago
+router.register(r'payment-methods', views.PaymentMethodViewSet)
+
 # SISTEMA DE PAGOS: ViewSets para gestión de pedidos y pagos
 router.register(r'pedidos', views.PedidoViewSet)
 router.register(r'pagos', views.PagoViewSet)
@@ -108,6 +111,16 @@ urlpatterns = [
     path('api/productos-cosechados/crear-rapido/', views.crear_producto_cosechado_rapido, name='crear-producto-cosechado-rapido'),
     path('api/productos-cosechados/buscar-avanzado/', views.buscar_productos_cosechados_avanzado, name='buscar-productos-cosechados-avanzado'),
     path('api/productos-cosechados/reporte-por-periodo/', views.reporte_productos_cosechados_por_periodo, name='reporte-productos-cosechados-por-periodo'),
+
+    # CU16: Endpoints específicos para gestión de métodos de pago
+    path('api/payment-methods/activos/', views.metodos_pago_activos, name='metodos-pago-activos'),
+    path('api/payment-methods/dropdown/', views.metodos_pago_dropdown, name='metodos-pago-dropdown'),
+    path('api/payment-methods/<int:pk>/activar-desactivar/', views.activar_desactivar_metodo_pago, name='activar-desactivar-metodo-pago'),
+    path('api/payment-methods/reordenar/', views.reordenar_metodos_pago, name='reordenar-metodos-pago'),
+    path('api/payment-methods/estadisticas/', views.estadisticas_metodos_pago, name='estadisticas-metodos-pago'),
+    path('api/payment-methods/buscar-avanzado/', views.buscar_metodos_pago_avanzado, name='buscar-metodos-pago-avanzado'),
+    path('api/payment-methods/<int:pk>/validar-eliminacion/', views.validar_eliminacion_metodo_pago, name='validar-eliminacion-metodo-pago'),
+
 
     # SISTEMA DE PAGOS: Endpoints específicos
     path('api/historial-ventas/', views.historial_ventas, name='historial-ventas'),
